@@ -1,0 +1,136 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> Barely Functional #1 | ben.kirw.in </title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css"></link>
+    <link rel="stylesheet" type="text/css" href="/css/kate-highlighting.css"></link>
+    <!--
+    <link href='http://fonts.googleapis.com/css?family=Open+Sans' rel='stylesheet' type='text/css'>
+    <link href='http://fonts.googleapis.com/css?family=PT+Sans+Narrow:700' rel='stylesheet' type='text/css'>
+    -->
+  </head>
+  <body>
+    <div class="content">
+      <header>
+        <img src="/img/construction.gif"></img>
+        <nav><ul>
+          <li><a href="/">home</a></li>
+          <li><a href="/about/">about</a></li>
+        </ul></nav>
+      </header>
+      <article>
+  <h1> Barely Functional #1 </h1>
+  <h2> Writing a Real Program in Haskell </h2>
+  <p>A lot of folks have been complaining about the gap between knowing elementary Haskell — the sort you learn in language tutorials — and real-world programming. Even when you’re comfortable with the core language, it’s not always obvious where to go from there, or how to translate those ideas into a larger system.</p>
+<p>Me, I’m <em>just</em> past this point. I’ve written little bits of Haskell off and on over the last year or so, but in the last weeks, I’ve been working on what could fairly be described as ‘real code’. It’s still fairly early on, but I think there’s enough there that someone might find it interesting. I’ll talk a little bit about the project itself, but mostly I plan to write about the experience of translating ideas into working Haskell code.</p>
+<p>I’m hoping this will be of interest to those who have read one of the many <a href="http://learnyouahaskell.com/">excellent</a> <a href="http://book.realworldhaskell.org/">introductory</a> <a href="https://www.fpcomplete.com/school/starting-with-haskell">guides</a> and are looking at what the next steps are like, or experienced Haskellers who are interested in what the late-beginner experience looks like these days. You might even be able to get something out of it without any Haskell experience, if you’re willing to squint past the code examples.</p>
+<h3 id="ethereum">Ethereum</h3>
+<p>This story revolves around my ongoing Haskell reimplementation of <a href="https://ethereum.org/">Ethereum</a>.</p>
+<p>The Ethereum project describes itself as a ‘platform for decentralized applications’. In a nutshell, it takes the blockchain concept that Bitcoin developed and extends it, such that you can have the same guarantees for arbitrary computations and state as Bitcoin gives you for financial transactions. It’s pretty early on, and there are a lot of issues still to be worked out, but I’m excited to see if the ideas that made Bitcoin work can be extended to a general-purpose infrastructure.</p>
+<p>Crypto-geekery aside, there are a few other factors that made this a nice language-learning project:</p>
+<ul>
+<li><p>Ethereum’s internals are very well documented, and the <a href="http://gavwood.com/Paper.pdf">yellow paper</a> explains the core datastructures and algorithms in a language-independent way. Porting code from one language to another is simpler when you try and maintain the same structure in the source and target languages, but that produces unidiomatic and foreign-feeling code. Writing against a spec makes it easier to avoid these compromises.</p></li>
+<li><p>Ethereum is already a polyglot project, with implementations in C++, Go, Python, Java, and JavaScript. A lot of design issues just aren’t obvious in a blog post code example, and a second implementation by the same author is often cleaner in any language. With the same core ideas written independantly in multiple languages, I had a chance to see how these differences work themselves out over an entire codebase.</p></li>
+<li><p>The Etherium spec covers a lot of ground, from parsing and serialization to datastructures, crypto, networking, and virtual machines. This provides an opportunity to get a sense of how the language holds up in a variety of different situations. On a practical note, it makes it a little harder to get bored. (A factor widely undervalued in side projects.)</p></li>
+<li><p>Learning a language is tough enough without also having to decide what to implement. Emulating the choices of an established project — even when they’re not choices I would have make — lets me worry about the <em>how</em>, instead of the <em>what</em>.</p></li>
+</ul>
+<p>Ethereum’s a neat project, and I’ve enjoyed going through what has turned out to be a pretty careful and well-considered spec. However, the goal of these posts is not an intro to Ethereum, so I’ll be skipping over a lot of details. If you’re interested in this stuff, feel free to follow the links and references scattered throughout.</p>
+<p>For now, we’ll start where I started: parsing and serialization.</p>
+<h3 id="rlp-encoding">RLP Encoding</h3>
+<p><a href="https://github.com/ethereum/wiki/wiki/%5BEnglish%5D-RLP">Recursive Length Prefix</a>, or RLP, is the standard data serialization mechanism in Ethereum. Like JSON, it defines an intermediate data representation with minimal structure and a canonical serialization. If you define a way to represent your datatypes in this format, you get a serialization and some structural transformations ‘for free’. Unline JSON, RLP is optomized for simple binary messages; it defines fewer types, and they serialize to compact binaries instead of human-readable strings.</p>
+<p>An RLP value is called an ‘item’. An item may be either a string of bytes or a list of items, like so:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Item</span> <span class="fu">=</span> <span class="dt">String</span> <span class="dt">ByteString</span> <span class="fu">|</span> <span class="dt">List</span> [<span class="dt">Item</span>]</code></pre></div>
+<p>And here’s a handful of items, for flavour:</p>
+<div class="sourceCode"><pre class="sourceCode json"><code class="sourceCode json"><span class="er">&quot;foo&quot;</span>
+<span class="ot">[]</span>
+<span class="ot">[[],</span> <span class="st">&quot;bar&quot;</span><span class="ot">,</span> <span class="ot">[</span><span class="st">&quot;baz&quot;</span><span class="ot">,</span> <span class="st">&quot;&quot;</span><span class="ot">]]</span>
+<span class="er">&quot;&quot;</span>
+<span class="ot">[[[</span><span class="st">&quot;\NUL&quot;</span><span class="ot">],[</span><span class="st">&quot;&quot;</span><span class="ot">,</span><span class="st">&quot;&quot;</span><span class="ot">],</span><span class="st">&quot;one&quot;</span><span class="ot">],[[</span><span class="st">&quot;two&quot;</span><span class="ot">],[]],[</span><span class="st">&quot;six&quot;</span><span class="ot">],</span><span class="st">&quot;4531&quot;</span><span class="ot">,</span> <span class="ot">[]]</span></code></pre></div>
+<p>I’m using the text-style notation for strings, but keep in mind that they’re just a flat sequence of bytes.</p>
+<p>The rest of the spec goes on to define a canonical serialization for any item. In short:</p>
+<ul>
+<li>Strings are serialized on the wire without escaping.</li>
+<li>A string containing a single small byte takes no prefix. All other strings are prefixed by length and a type flag.</li>
+<li>A list of items is encoded by concatenating the serialized elements, and prefixing <em>that</em> with its length and type. (This is the eponymous Recursive Length Prefixing at work.)</li>
+</ul>
+<p>There’s a couple other nuances, but overall things are pretty simple. Here’s my serialization function, in full:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">encode ::</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">ByteString</span>
+encode x <span class="fu">=</span> <span class="kw">case</span> x <span class="kw">of</span>
+  <span class="dt">String</span> bytes <span class="ot">-&gt;</span> 
+    <span class="kw">if</span> BS.length bytes <span class="fu">==</span> <span class="dv">1</span> <span class="fu">&amp;&amp;</span> BS.head bytes <span class="fu">&lt;</span> <span class="bn">0x80</span> <span class="kw">then</span> bytes
+    <span class="kw">else</span> encodeLength <span class="bn">0x80</span> bytes
+  <span class="dt">List</span> children <span class="ot">-&gt;</span> encodeLength <span class="bn">0xc0</span> (mconcat <span class="fu">$</span> map encode children)
+  <span class="kw">where</span>
+<span class="ot">    encodeLength ::</span> <span class="dt">Word8</span> <span class="ot">-&gt;</span> <span class="dt">ByteString</span> <span class="ot">-&gt;</span> <span class="dt">ByteString</span>
+    encodeLength offset bytes 
+      <span class="fu">|</span> len <span class="fu">&lt;=</span> <span class="dv">55</span> <span class="fu">=</span> prefix len <span class="fu">&lt;&gt;</span> bytes
+      <span class="fu">|</span> otherwise <span class="fu">=</span> 
+        <span class="kw">let</span> lenBytes <span class="fu">=</span> encodeInt len
+            <span class="co">-- offsets from 0x80 + 55 = 0xb7 for strings</span>
+            <span class="co">--          and 0xc0 + 55 = 0xF7 for lists</span>
+            lenLen <span class="fu">=</span> BS.length lenBytes <span class="fu">+</span> <span class="dv">55</span>
+        <span class="kw">in</span> prefix lenLen <span class="fu">&lt;&gt;</span> lenBytes <span class="fu">&lt;&gt;</span> bytes
+      <span class="kw">where</span>
+        len <span class="fu">=</span> BS.length bytes
+        prefix n <span class="fu">=</span> BS.singleton <span class="fu">$</span> offset <span class="fu">+</span> fromIntegral n</code></pre></div>
+<p>Deserialization’s a bit more involved, and uses the <a href="https://www.fpcomplete.com/school/starting-with-haskell/libraries-and-frameworks/text-manipulation/attoparsec">attoparsec</a> library for the parsing. You can see the complete implementation on <a href="https://github.com/bkirwi/ethereum-haskell/blob/8dbc6239952f14228d17ced5c0932068b0ce8943/src/Ethereum/RLP.hs">GitHub</a>. For the rest of the spec, check the <a href="https://github.com/ethereum/wiki/wiki/%5BEnglish%5D-RLP">wiki</a> or Appendix C in the <a href="http://gavwood.com/Paper.pdf">yellow paper</a>. (The implementation above mirrors the sample python implementation in the wiki quite closely.)</p>
+<h3 id="general-comments">General Comments</h3>
+<p>Overall, this implementation came pretty smoothly. I spent a little too much time trying to pick a library for binary parsing / formatting: I’m aware of three different libraries for writing data to ByteStrings, and three for reading data back, and they’re not the same three. <code>binary</code> and <code>cereal</code> in particular are very similar. In the end, I went with raw ByteString concatenation and attoparsec. The code turned out nicely enough, so I doubt I’ll be revisiting that choice unless a performance issue crops up.</p>
+<p>In retrospect, attoparsec is probably overkill for this simple format, but I was glad to get an opportunity to play around with it. I found the API very easy to pick up: there’s a few functions to define basic parsers, a couple to run the entire parser, and the rest of the work is done by the standard Haskell typeclasses. (Combining parsers together, defining parsers that take no input, etc.) One thing I’ve come to like about Haskell is that, while the experience of programming ‘inside a monad’ feels odd at first, all monads feel more or less the same. This makes it easy to walk up and down the ladder of abstraction: the code talks about parsing logic where it needs to, and everything else feels more or less like business as usual.</p>
+<p>This turned out to be a pretty nice place to start the project: it’s a well-encapsulated problem, and the solution feels pleasant in Haskell and not too foreign. I’ve also been happy with the approach of building the program ‘inside out’, starting with a few small pieces and then composing them into larger and larger units. I’ve had to make very few changes to this code as the program grew around it, but having this code functional has helped a lot in deciding what the higher-level pieces need to look like.</p>
+<h3 id="testing">Testing</h3>
+<p>The first implementation I put together had several bugs. We could chalk that up to sloppiness, but I prefer (for my personal education and self-esteem) to try and figure out <em>why</em> a bit of code was particularly buggy. Sometimes it turns out I just need to be more careful, but there’s often a more fundamental issue there somewhere.</p>
+<p>Anyone with exposure to Haskell will be familiar with the “once the code typechecks, it usually works” meme. I also believe this: in a type-rich environment, most errors seem to be caught at compile time. This code, however, has very little type information floating around: it’s building up datastructures from raw bits, and all bits look more or less the same. There’s no way for the compiler to know that my particular interpretation of those bits doesn’t match the spec. In languages with a pleasant type-system, many programmers know the feeling where the types are guiding them to a particular solution. In cases like this, though, the environment is much more homogenous — and that’s where these tools are less useful, and we need to be more careful.</p>
+<p>Or, we could just use QuickCheck.</p>
+<p>I feel like maybe QuickCheck gets lost in the whirlwind of new terminology that young Haskellers are exposed to, which is sad, because it’s astonishingly useful. It has a much better payoff-per-unit-effort than ordinary unit testing, and it’s also a useful <em>conceptual</em> tool: it encourages you to take the properties your implementation ought to have and make them explicit, even when you can’t pack that information into the typesystem. In the future, I wouldn’t consider code like this ‘finished’ without a couple high-level property checks like this.</p>
+<p>A full QuickCheck tutorial is somewhat out of scope here, but here’s my code for generating arbitrary RLP items, with some size management so we don’t recurse forever:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">Arbitrary</span> <span class="dt">RLP.Item</span> <span class="kw">where</span>
+
+  arbitrary <span class="fu">=</span> sized item
+    <span class="kw">where</span> 
+      item n 
+        <span class="fu">|</span> n <span class="fu">&lt;=</span> <span class="dv">2</span> <span class="fu">=</span> strGen
+        <span class="fu">|</span> otherwise <span class="fu">=</span> oneof [strGen, resize (n <span class="ot">`div`</span> <span class="dv">2</span>) listGen ]
+      strGen <span class="fu">=</span> <span class="dt">RLP.String</span> <span class="fu">&lt;$&gt;</span> arbitrary
+      listGen <span class="fu">=</span> <span class="dt">RLP.List</span> <span class="fu">&lt;$&gt;</span> arbitrary</code></pre></div>
+<p>And two of the 5-10 properties I’m checking:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell">it <span class="st">&quot;should decode what it encodes&quot;</span> <span class="fu">$</span> property <span class="fu">$</span> \rlp <span class="ot">-&gt;</span>
+  (RLP.decode <span class="fu">.</span> RLP.encode <span class="fu">$</span> rlp) <span class="ot">`shouldBe`</span> <span class="dt">Just</span> rlp
+
+it <span class="st">&quot;should encode small bytes as themselves&quot;</span> <span class="fu">$</span> property <span class="fu">$</span> \byte <span class="ot">-&gt;</span>
+  byte <span class="fu">&lt;</span> <span class="bn">0x80</span> <span class="fu">==&gt;</span> 
+    <span class="kw">let</span> oneByte <span class="fu">=</span> BS.pack [byte]
+    <span class="kw">in</span> RLP.encode (<span class="dt">RLP.String</span> oneByte) <span class="ot">`shouldBe`</span> oneByte</code></pre></div>
+<p>This turns out to be <em>much</em> more effective than unit testing. My first compiling implementation worked against all the examples from the wiki, but adding just the two properties above flushed out three or four latent issues. I’ve added around twenty-five new test inputs since then (from the <a href="https://github.com/ethereum/tests">shared Ethereum test suite</a>) with no new failures. Some of the bugs QuickCheck found would only show up on very specific examples — like a list containing a single string, which consists of a single byte with a value less than 128. Testing at that level of granularity is infeasible to do by hand, so the automation is more than welcome.</p>
+<h3 id="other-implementations">Other Implementations</h3>
+<p>I’ve briefly compared my code with the official <a href="https://github.com/ethereum/eth-go/blob/master/ethutil/rlp.go">Go</a> and <a href="https://github.com/ethereum/pyethereum/blob/master/pyethereum/rlp.py">Python</a>. I chose these two because they’re two of the most actively developed, and I have some passing familiarity with the respective languages. I’ve tried not to go too far out on a limb, but please let me know if anything’s off base.</p>
+<ul>
+<li><p>The implementation of decoding / encoding in Haskell is about half the size of the equivalent Python and Go. It looks like most of the difference is made up in the parser code. (Attoparsec gets a lot of credit for this.)</p></li>
+<li><p>Both the Python and Go implementations of <code>encode</code> can throw a type error at runtime. For Python, this is, of course, perfectly normal. In Go, it’s because the parameter is passed as an <code>interface{}</code>, which can contain any value. (Go has no way to declare a sum or ‘union’ type.) Based on some messages in the <a href="https://groups.google.com/forum/#!msg/golang-nuts/-94Fmnz9L6k/4BUxp-JqZFUJ">Go mailing list</a>, this is considered not a big deal, is unlikely to change, and switching on the type tag is the idiomatic solution.</p>
+<p>Interestingly, this switch statement also includes about a bunch of other types, like various numeric types, so the set of all legal inputs is very large. Conversely, the Python code will fail if passed anything other than a string or list. This makes the Python more strict about typing than the Go, which is a bit surprising.</p></li>
+</ul>
+<p>Overall, the differences between the implementations were pretty minor: they all have roughly the same structure, and they all expose similar APIs. I like my own implementation, naturally, but I don’t think there are any very compelling differences here yet.</p>
+<h3 id="bootstrapping-a-project">Bootstrapping a Project</h3>
+<p>Sadly, much of the time it took to get this code working was spent on project setup. There’s not a lot of great information out there about bootstrapping a new Haskell/Cabal project, and that makes much more time-consuming than it needs to be. Some tips from hard-won experience:</p>
+<ul>
+<li>Use Cabal’s sandboxes. Everything you read about cabal-dev is out of date. However, you’ll probably need a more recent version of cabal than your package manager provides. Fortunately, <code>cabal-install</code> can install itself; run <code>cabal   install cabal-install</code> and check it’s showing up on your path correctly.</li>
+<li>The Cabal documentation suggests using the <code>detailed</code> test runner. Sadly, this does not actually work with any of the popular testing frameworks. This may change one day, but for now, stick with <code>exitcode-stdio</code>.</li>
+<li>Use <code>HSpec</code> for unit tests. It has a superset of the functionality in the other frameworks, including inline QuickCheck properties, and produces well-organized test suites with attractive and readable output.</li>
+</ul>
+<p><a href="http://taylor.fausak.me/2014/03/04/haskeleton-a-haskell-project-skeleton/">This post</a> has some other pointers for setting up a project, though you may not need all of that when you’re just getting started. I like the suggestion of using a project template, though I have not tried it.</p>
+<h3 id="moving-along">Moving Along</h3>
+<p>Of course, this is still only half the work… we can convert from RLP to raw bytes, but we still need to convert our datatypes to RLP. This turns out to be more interesting than it sounds, and is where the languages’ implementations really start to diverge. It’s also a nice chance to mess around with <code>DeriveGeneric</code>, and discuss the merits of typeclasses vs. explicit dictionary-passing.</p>
+<p><a href="/2014/08/14/barely-functional-2-convertible/">Next time!</a></p>
+</article>
+<footer>
+  <p>
+  No comments here! 
+
+  Feel free to get in touch on <a href="https://github.com/bkirwi">
+    GitHub</a> or <a href="https://twitter.com/bkirwi">Twitter</a>.
+  </p>
+<footer>
+
+    </div>
+  </body>
+</html>

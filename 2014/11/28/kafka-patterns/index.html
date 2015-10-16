@@ -1,0 +1,856 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> Doing the Impossible | ben.kirw.in </title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css"></link>
+    <link rel="stylesheet" type="text/css" href="/css/kate-highlighting.css"></link>
+    <!--
+    <link href='http://fonts.googleapis.com/css?family=Open+Sans' rel='stylesheet' type='text/css'>
+    <link href='http://fonts.googleapis.com/css?family=PT+Sans+Narrow:700' rel='stylesheet' type='text/css'>
+    -->
+  </head>
+  <body>
+    <div class="content">
+      <header>
+        <img src="/img/construction.gif"></img>
+        <nav><ul>
+          <li><a href="/">home</a></li>
+          <li><a href="/about/">about</a></li>
+        </ul></nav>
+      </header>
+      <article>
+  <h1> Doing the Impossible </h1>
+  <h2> Exactly-once Messaging Patterns in Kafka </h2>
+  <p>Exactly-once messaging is something of a holy grail in the Kafka ecosystem – widely sought-after but rarely encountered. There are a handful of systems that promise exactly-once semantics, but none of them are a general-purpose solution: they’re often too task-specific, too heavyweight, or too broken, and sometimes all three. Complicating the picture is the fact that exactly-once message delivery is, in general, impossible.</p>
+<p>Thankfully, the picture is not so bleak. While there may be no one-size-fits-all mechanism for exactly-once delivery, there are many specific situations where it is possible to implement something with the right semantics – and better, it’s often surprisingly cheap. In this post, we’ll do this for a handful simple streaming problems, and talk about how to extend these ideas to larger systems.</p>
+<h3 id="how-kafka-works">How Kafka Works</h3>
+<p>To start on a sound footing, we’ll spin quickly though some of Kafka’s abstractions and semantics. If any of this is unfamiliar, you may want to go through the <a href="http://kafka.apache.org/documentation.html#design">Kafka design docs</a> – particularly the section on delivery semantics – or <a href="http://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying">Jay Kreps’ excellent writeup</a> on the underlying log abstraction.</p>
+<p>A Kafka topic is a named collection of numbered partitions, and each partition is backed by a log. A log is just an ordered series of messages, like so:</p>
+<svg width="296pt" height="38pt" viewBox="0.00 0.00 296.00 38.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 34)">
+<title>log</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-34 292,-34 292,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-0.5 0,-29.5 288,-29.5 288,-0.5 0,-0.5"></polygon>
+<text text-anchor="middle" x="14" y="-11.3" font-family "" font-size="14.00">0</text>
+<polyline fill="none" stroke="black" points="28,-0.5 28,-29.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-11.3" font-family "" font-size="14.00">1</text>
+<polyline fill="none" stroke="black" points="57,-0.5 57,-29.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-11.3" font-family "" font-size="14.00">2</text>
+<polyline fill="none" stroke="black" points="86,-0.5 86,-29.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-11.3" font-family "" font-size="14.00">3</text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-11.3" font-family "" font-size="14.00">4</text>
+<polyline fill="none" stroke="black" points="144,-0.5 144,-29.5 "></polyline>
+<text text-anchor="middle" x="158" y="-11.3" font-family "" font-size="14.00">5</text>
+<polyline fill="none" stroke="black" points="172,-0.5 172,-29.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-11.3" font-family "" font-size="14.00">6</text>
+<polyline fill="none" stroke="black" points="201,-0.5 201,-29.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-11.3" font-family "" font-size="14.00">7</text>
+<polyline fill="none" stroke="black" points="230,-0.5 230,-29.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-11.3" font-family "" font-size="14.00">8</text>
+<polyline fill="none" stroke="black" points="259,-0.5 259,-29.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-11.3" font-family "" font-size="14.00">9</text>
+</g>
+</g>
+</svg>
+
+<p>Each message in the log has a unique offset, starting at zero and counting up as new messages are added.</p>
+<p>Unlike a traditional queue, consumers never ‘remove’ or ‘poll’ a message from a Kafka topic. Typically, each partition will be assigned to a specific consumer, and that consumer keeps track of its own position in the log:</p>
+<svg width="296pt" height="78pt" viewBox="0.00 0.00 296.00 77.60" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 73.6)">
+<title>cursors</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-73.6 292,-73.6 292,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-40.1 0,-69.1 288,-69.1 288,-40.1 0,-40.1"></polygon>
+<text text-anchor="middle" x="14" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-40.1 28,-69.1 "></polyline>
+<text text-anchor="middle" x="42.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-40.1 57,-69.1 "></polyline>
+<text text-anchor="middle" x="71.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-40.1 86,-69.1 "></polyline>
+<text text-anchor="middle" x="100.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-40.1 115,-69.1 "></polyline>
+<text text-anchor="middle" x="129.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-40.1 144,-69.1 "></polyline>
+<text text-anchor="middle" x="158" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-40.1 172,-69.1 "></polyline>
+<text text-anchor="middle" x="186.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-40.1 201,-69.1 "></polyline>
+<text text-anchor="middle" x="215.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-40.1 230,-69.1 "></polyline>
+<text text-anchor="middle" x="244.5" y="-50.9" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-40.1 259,-69.1 "></polyline>
+<text text-anchor="middle" x="273.5" y="-50.9" font-family "" font-size="14.00"> </text>
+</g>
+<!-- cursor1 -->
+<g id="node2" class="node"><title>cursor1</title>
+<ellipse fill="none" stroke="none" cx="173" cy="-1.8" rx="1.8" ry="1.8"></ellipse>
+</g>
+<!-- input&#45;&gt;cursor1 -->
+<g id="edge1" class="edge"><title>input:6:sw-&gt;cursor1:nw</title>
+<path fill="none" stroke="#268bd2" d="M166.997,-33.3257C161.052,-23.547 162.719,-12.8808 172,-3.6"></path>
+<polygon fill="#268bd2" stroke="#268bd2" points="164.823,-35.0906 172,-39.6 169.202,-31.5994 164.823,-35.0906"></polygon>
+</g>
+</g>
+</svg>
+
+<p>To avoid starting from scratch after a failure, consumers usually commit these offsets to some persistent store. (As of Kafka 0.8.1, the high-level consumer stores these in ZooKeeper, but Kafka expects to ship <a href="https://cwiki.apache.org/confluence/display/KAFKA/A+Guide+To+The+Kafka+Protocol#AGuideToTheKafkaProtocol-OffsetCommit/FetchAPI">its own API</a> for this in a future release.) If a consumer fails, it can retrieve its stored offset on startup and resume from there.</p>
+<p>This offset is committed asynchronously, so it’s usually a little behind the offset of the last message processed. Even if we chose to commit the offset after every single message, the problem is not gone – there’s still a moment, just after processing completes but before the offset is persisted, where the offset in permanent storage is stale. If there’s a failure, and the consumer restores from a stale commit, it will process a small number of messages again. This is called at-least-once delivery – every message will get processed, but some may be processed more than once.</p>
+<p>Of course, we almost never actually want those duplicate deliveries – we’d like every message to be processed exactly once. Unfortunately, this turns out to be impossible; in a distributed system, there’s no general-purpose way to ensure that some arbitrary operation will run exactly once for every message. There’s a pretty good discussion of this <a href="https://lobste.rs/s/ecjfcm/why_is_exactly-once_messaging_not_possible_in_a_distributed_queue/comments/e5qcdf#c_e5qcdf">on <code>lobste.rs</code></a>, and the <a href="http://kafka.apache.org/documentation.html#design">Kafka docs</a> mention the same issue:</p>
+<blockquote>
+<p>So what about exactly once semantics (i.e. the thing you actually want)? The limitation here is not actually a feature of the messaging system but rather the need to co-ordinate the consumer’s position with what is actually stored as output. [This can be handled] by simply letting the consumer store its offset in the same place as its output. […] As an example of this, our Hadoop ETL that populates data in HDFS stores its offsets in HDFS with the data it reads so that it is guaranteed that either data and offsets are both updated or neither is.</p>
+</blockquote>
+<p>So Kafka can’t implement exactly-once semantics on its own, but <a href="https://github.com/linkedin/camus">Camus</a> can – dumping a Kafka queue into a file is a very constrained sort of operation, and when you scope your problem down that small, getting exactly-once semantics is not too hard. In this post, we’ll extend these ideas cover a wide variety of situations: tasks that both consume and produce messages, or that keep some intermediate state, or that consume from or produce to multiple partitions. In general, we’ll be looking for the smallest amount of state or coordination that works for a particular task. Since there’s no general-purpose solution, we may as well tailor our coordination to the job at hand; and by exploiting some of the specifics, we can often keep the overhead very low.</p>
+<p>I’m also going to focus heavily on ‘stream transformations’. Most of the writing and implementations out there only deal with exactly-once state updates, which is understandable; when you’re first building a system on Kafka, you’re most interested in getting data in or pulling data out. In a developed system, though, you’re likely to have a bunch of jobs that consume data from Kafka, do some processing, and write the results <em>back</em> to Kafka for a downstream job. (Martin Kleppmann compares this to <a href="https://speakerdeck.com/ept/kafka-and-samza-distributed-stream-processing-in-practice">UNIX pipes</a>, which feels quite apt.) For these kind of jobs, just updating state exactly-once is not enough – you also want to avoid sending duplicate messages – so we’ll take care to make sure to extend our exactly-once semantics to the messaging layer.</p>
+<p>I don’t want to take credit for any of these ideas: most of them are collected from various sources or the Kafka folklore, or small extensions to known techniques, and I’ve tried to give credit where I can. On the other hand, I do think the sum is greater than its parts – I hope that by collecting these together, it makes it easier to design systems with a more reasonable semantics.</p>
+<h3 id="exclusive-producer">Exclusive Producer</h3>
+<p>Let’s consider a ‘hello world’ of stream processing: a job that takes a single input topic and copy it to an output topic, partition by partition:</p>
+<svg width="296pt" height="104pt" viewBox="0.00 0.00 296.00 104.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 100)">
+<title>cat</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-100 292,-100 292,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-66.5 0,-95.5 288,-95.5 288,-66.5 0,-66.5"></polygon>
+<text text-anchor="middle" x="14" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-66.5 28,-95.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-66.5 57,-95.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-66.5 86,-95.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-66.5 115,-95.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-66.5 144,-95.5 "></polyline>
+<text text-anchor="middle" x="158" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-66.5 172,-95.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-66.5 201,-95.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-66.5 230,-95.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-66.5 259,-95.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="0,-0.5 0,-29.5 288,-29.5 288,-0.5 0,-0.5"></polygon>
+<text text-anchor="middle" x="14" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-0.5 28,-29.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-0.5 57,-29.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-0.5 86,-29.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-0.5 144,-29.5 "></polyline>
+<text text-anchor="middle" x="158" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-0.5 172,-29.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-0.5 201,-29.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-0.5 230,-29.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-0.5 259,-29.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:0-&gt;output:0</title>
+<path fill="none" stroke="#586e75" d="M14,-66C14,-53.125 14,-48.0203 14,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="16.8001,-38 14,-30 11.2001,-38 16.8001,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge2" class="edge"><title>input:1-&gt;output:1</title>
+<path fill="none" stroke="#586e75" d="M42,-66C42,-53.125 42,-48.0203 42,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="44.8001,-38 42,-30 39.2001,-38 44.8001,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge3" class="edge"><title>input:2-&gt;output:2</title>
+<path fill="none" stroke="#586e75" d="M71,-66C71,-53.125 71,-48.0203 71,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="73.8001,-38 71,-30 68.2001,-38 73.8001,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge4" class="edge"><title>input:3-&gt;output:3</title>
+<path fill="none" stroke="#586e75" d="M100,-66C100,-53.125 100,-48.0203 100,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="102.8,-38 100,-30 97.2001,-38 102.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge5" class="edge"><title>input:4-&gt;output:4</title>
+<path fill="none" stroke="#586e75" d="M129,-66C129,-53.125 129,-48.0203 129,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="131.8,-38 129,-30 126.2,-38 131.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge6" class="edge"><title>input:5-&gt;output:5</title>
+<path fill="none" stroke="#586e75" d="M158,-66C158,-53.125 158,-48.0203 158,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="160.8,-38 158,-30 155.2,-38 160.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge7" class="edge"><title>input:6-&gt;output:6</title>
+<path fill="none" stroke="#586e75" d="M187,-66C187,-53.125 187,-48.0203 187,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="189.8,-38 187,-30 184.2,-38 189.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge8" class="edge"><title>input:7-&gt;output:7</title>
+<path fill="none" stroke="#586e75" d="M216,-66C216,-53.125 216,-48.0203 216,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="218.8,-38 216,-30 213.2,-38 218.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge9" class="edge"><title>input:8-&gt;output:8</title>
+<path fill="none" stroke="#586e75" d="M245,-66C245,-53.125 245,-48.0203 245,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="247.8,-38 245,-30 242.2,-38 247.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge10" class="edge"><title>input:9-&gt;output:9</title>
+<path fill="none" stroke="#586e75" d="M274,-66C274,-53.125 274,-48.0203 274,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="276.8,-38 274,-30 271.2,-38 276.8,-38"></polygon>
+</g>
+</g>
+</svg>
+
+<p>This is about as simple as it gets. There’s no processing to do or state to manage, and every input message corresponds to exactly one output message.</p>
+<p>An obvious implementation might use Kafka’s high-level stream consumer, taking each incoming message and publishing it to the output log. While convenient, this setup can duplicate messages if the processor fails: if the last commit was half a second before the failure, that last half-second of messages will be written twice.</p>
+<svg width="371pt" height="104pt" viewBox="0.00 0.00 370.50 104.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 100)">
+<title>whoops</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-100 366.5,-100 366.5,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-66.5 0,-95.5 288,-95.5 288,-66.5 0,-66.5"></polygon>
+<text text-anchor="middle" x="14" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-66.5 28,-95.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-66.5 57,-95.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-66.5 86,-95.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-66.5 115,-95.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-66.5 144,-95.5 "></polyline>
+<text text-anchor="middle" x="158" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-66.5 172,-95.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-66.5 201,-95.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-66.5 230,-95.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-66.5 259,-95.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="0,-0.5 0,-29.5 230,-29.5 230,-0.5 0,-0.5"></polygon>
+<text text-anchor="middle" x="14" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-0.5 28,-29.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-0.5 57,-29.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-0.5 86,-29.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="143,-0.5 143,-29.5 "></polyline>
+<text text-anchor="middle" x="157.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-0.5 172,-29.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-0.5 201,-29.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:0-&gt;output:0</title>
+<path fill="none" stroke="none" d="M14,-66C14,-53.125 14,-48.0203 14,-38.1805"></path>
+<polygon fill="none" stroke="none" points="16.8001,-38 14,-30 11.2001,-38 16.8001,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge6" class="edge"><title>input:6:sw-&gt;output:5:n</title>
+<path fill="none" stroke="#268bd2" d="M166.403,-59.8914C159.252,-51.1172 158,-44.0825 158,-30"></path>
+<polygon fill="#268bd2" stroke="#268bd2" points="164.531,-61.9931 172,-66 168.66,-58.2099 164.531,-61.9931"></polygon>
+</g>
+<!-- recovery -->
+<g id="node3" class="node"><title>recovery</title>
+<polygon fill="none" stroke="black" points="247.5,-0.5 247.5,-29.5 362.5,-29.5 362.5,-0.5 247.5,-0.5"></polygon>
+<text text-anchor="middle" x="261.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="275.5,-0.5 275.5,-29.5 "></polyline>
+<text text-anchor="middle" x="290" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="304.5,-0.5 304.5,-29.5 "></polyline>
+<text text-anchor="middle" x="319" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="333.5,-0.5 333.5,-29.5 "></polyline>
+<text text-anchor="middle" x="348" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;recovery -->
+<g id="edge2" class="edge"><title>input:6:s-&gt;recovery:6:n</title>
+<path fill="none" stroke="#586e75" d="M187,-66C187,-32.5688 248.828,-60.7338 259.454,-37.8895"></path>
+<polygon fill="#586e75" stroke="#586e75" points="262.21,-38.3891 261,-30 256.714,-37.3124 262.21,-38.3891"></polygon>
+</g>
+<!-- input&#45;&gt;recovery -->
+<g id="edge3" class="edge"><title>input:7:s-&gt;recovery:7:n</title>
+<path fill="none" stroke="#586e75" d="M216,-66C216,-32.5688 277.828,-60.7338 288.454,-37.8895"></path>
+<polygon fill="#586e75" stroke="#586e75" points="291.21,-38.3891 290,-30 285.714,-37.3124 291.21,-38.3891"></polygon>
+</g>
+<!-- input&#45;&gt;recovery -->
+<g id="edge4" class="edge"><title>input:8:s-&gt;recovery:8:n</title>
+<path fill="none" stroke="#586e75" d="M245,-66C245,-32.5688 306.828,-60.7338 317.454,-37.8895"></path>
+<polygon fill="#586e75" stroke="#586e75" points="320.21,-38.3891 319,-30 314.714,-37.3124 320.21,-38.3891"></polygon>
+</g>
+<!-- input&#45;&gt;recovery -->
+<g id="edge5" class="edge"><title>input:9:s-&gt;recovery:9:n</title>
+<path fill="none" stroke="#586e75" d="M274,-66C274,-32.5688 335.828,-60.7338 346.454,-37.8895"></path>
+<polygon fill="#586e75" stroke="#586e75" points="349.21,-38.3891 348,-30 343.714,-37.3124 349.21,-38.3891"></polygon>
+</g>
+</g>
+</svg>
+
+<p>If we want to copy over each message just once, we’ll need some way to avoid these duplicate messages. This is nontrivial: if a failure happens while it’s sending messages to the broker – whether from a network error or a node crash – we can’t always tell if the broker handled the request or not, so we don’t know if it’s safe to resend the message.</p>
+<p>In our case, though, it’s not too hard to check. When our task restarts, we can check the latest offset in the output log. If there are 8 messages in the output, it means we’ve handled 8 messages of input – and if we restart the consumer there, we’ll pick up right where we left off.</p>
+<svg width="314pt" height="104pt" viewBox="0.00 0.00 314.00 104.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 100)">
+<title>resumed</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-100 310,-100 310,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-66.5 0,-95.5 288,-95.5 288,-66.5 0,-66.5"></polygon>
+<text text-anchor="middle" x="14" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-66.5 28,-95.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-66.5 57,-95.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-66.5 86,-95.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-66.5 115,-95.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-66.5 144,-95.5 "></polyline>
+<text text-anchor="middle" x="158" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-66.5 172,-95.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-66.5 201,-95.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-66.5 230,-95.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-66.5 259,-95.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="0,-0.5 0,-29.5 230,-29.5 230,-0.5 0,-0.5"></polygon>
+<text text-anchor="middle" x="14" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-0.5 28,-29.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-0.5 57,-29.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-0.5 86,-29.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="143,-0.5 143,-29.5 "></polyline>
+<text text-anchor="middle" x="157.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-0.5 172,-29.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-0.5 201,-29.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:7:se-&gt;output:7:ne</title>
+<path fill="none" stroke="none" d="M235.003,-59.7257C239.648,-52.0861 239.646,-43.9048 234.998,-36.2656"></path>
+<polygon fill="none" stroke="none" points="232.798,-57.9994 230,-66 237.177,-61.4906 232.798,-57.9994"></polygon>
+<polygon fill="none" stroke="none" points="237.178,-34.5082 230,-30 232.8,-38.0002 237.178,-34.5082"></polygon>
+</g>
+<!-- recovery -->
+<g id="node3" class="node"><title>recovery</title>
+<polygon fill="none" stroke="black" points="248,-0.5 248,-29.5 306,-29.5 306,-0.5 248,-0.5"></polygon>
+<text text-anchor="middle" x="262.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="277,-0.5 277,-29.5 "></polyline>
+<text text-anchor="middle" x="291.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;recovery -->
+<g id="edge2" class="edge"><title>input:8-&gt;recovery:8:n</title>
+<path fill="none" stroke="#586e75" d="M245,-66C245,-51.4852 256.44,-48.4656 260.551,-38.0818"></path>
+<polygon fill="#586e75" stroke="#586e75" points="263.344,-38.3687 262,-30 257.832,-37.3801 263.344,-38.3687"></polygon>
+</g>
+<!-- input&#45;&gt;recovery -->
+<g id="edge3" class="edge"><title>input:9-&gt;recovery:9:n</title>
+<path fill="none" stroke="#586e75" d="M274,-66C274,-51.3258 286.112,-48.539 290.465,-38.1369"></path>
+<polygon fill="#586e75" stroke="#586e75" points="293.269,-38.3804 292,-30 287.766,-37.3424 293.269,-38.3804"></polygon>
+</g>
+</g>
+</svg>
+
+<p>This copies every input message to the output precisely once, and in this simple case, it actually takes less state than the naive version.</p>
+<p>This is very similar to Camus’ approach, where the offset is stored alongside the state. Here, the output partition is the state – and the latest offset is updated ‘implicitly’ every time a message is written to the topic. It’s also very similar to Kafka’s ‘idempotent producer’ proposal, and the FAQ mentions a <a href="https://cwiki.apache.org/confluence/display/KAFKA/FAQ#FAQ-HowdoIgetexactly-oncemessagingfromKafka?">very similar approach</a>. On its own, this ‘read your own output offset’ approach is fairly limited and brittle; but it’s also a useful tool for more complicated systems.</p>
+<p>The key here is that our producer is the <em>only</em> producer writing to a particular partition – if there were multiple writers, it would be impossible to tell if it was your write that succeeded or another task’s. Having this constraint makes the system much easier to reason about; if you can set your system up with a single writer per partition, it’s almost always worthwhile.</p>
+<h3 id="committing-multiple-offsets">Committing Multiple Offsets</h3>
+<p>One of the big limitations of that first approach is that it’s restricted to one-to-one mappings between input and output. Many interesting operations don’t fit this pattern: we may want to filter bad data out of the stream so that it’s not represented in the output at all, or split the incoming messages up into several messages and write all of them out.</p>
+<p>In the general case, where an input message can produce any amount of output, things can get a bit chaotic:</p>
+<svg width="296pt" height="104pt" viewBox="0.00 0.00 296.00 104.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 100)">
+<title>chaos</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-100 292,-100 292,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-66.5 0,-95.5 288,-95.5 288,-66.5 0,-66.5"></polygon>
+<text text-anchor="middle" x="14" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-66.5 28,-95.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-66.5 57,-95.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-66.5 86,-95.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-66.5 115,-95.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-66.5 144,-95.5 "></polyline>
+<text text-anchor="middle" x="158" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-66.5 172,-95.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-66.5 201,-95.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-66.5 230,-95.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-66.5 259,-95.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="0,-0.5 0,-29.5 288,-29.5 288,-0.5 0,-0.5"></polygon>
+<text text-anchor="middle" x="14" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-0.5 28,-29.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-0.5 57,-29.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-0.5 86,-29.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-0.5 144,-29.5 "></polyline>
+<text text-anchor="middle" x="158" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-0.5 172,-29.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-0.5 201,-29.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-0.5 230,-29.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-0.5 259,-29.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:0-&gt;output:0</title>
+<path fill="none" stroke="#586e75" d="M14,-66C14,-53.125 14,-48.0203 14,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="16.8001,-38 14,-30 11.2001,-38 16.8001,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge2" class="edge"><title>input:0-&gt;output:1</title>
+<path fill="none" stroke="#586e75" d="M14,-66C14,-48.8974 33.9336,-49.4569 40.1628,-37.8737"></path>
+<polygon fill="#586e75" stroke="#586e75" points="42.9089,-38.427 42,-30 37.4554,-37.1545 42.9089,-38.427"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge3" class="edge"><title>input:2-&gt;output:2</title>
+<path fill="none" stroke="#586e75" d="M71,-66C71,-53.125 71,-48.0203 71,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="73.8001,-38 71,-30 68.2001,-38 73.8001,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge4" class="edge"><title>input:4-&gt;output:3</title>
+<path fill="none" stroke="#586e75" d="M129,-66C129,-48.6646 108.354,-49.5805 101.903,-37.9487"></path>
+<polygon fill="#586e75" stroke="#586e75" points="104.586,-37.1283 100,-30 99.1395,-38.4321 104.586,-37.1283"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge5" class="edge"><title>input:4-&gt;output:4</title>
+<path fill="none" stroke="#586e75" d="M129,-66C129,-53.125 129,-48.0203 129,-38.1805"></path>
+<polygon fill="#586e75" stroke="#586e75" points="131.8,-38 129,-30 126.2,-38 131.8,-38"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge6" class="edge"><title>input:4-&gt;output:5</title>
+<path fill="none" stroke="#586e75" d="M129,-66C129,-48.6646 149.646,-49.5805 156.097,-37.9487"></path>
+<polygon fill="#586e75" stroke="#586e75" points="158.861,-38.4321 158,-30 153.414,-37.1283 158.861,-38.4321"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge7" class="edge"><title>input:4-&gt;output:6</title>
+<path fill="none" stroke="#586e75" d="M129,-66C129,-38.9788 175.006,-55.5992 185.07,-38.1246"></path>
+<polygon fill="#586e75" stroke="#586e75" points="187.875,-38.4305 187,-30 182.427,-37.1364 187.875,-38.4305"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge8" class="edge"><title>input:6-&gt;output:7</title>
+<path fill="none" stroke="#586e75" d="M187,-66C187,-48.6646 207.646,-49.5805 214.097,-37.9487"></path>
+<polygon fill="#586e75" stroke="#586e75" points="216.861,-38.4321 216,-30 211.414,-37.1283 216.861,-38.4321"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge9" class="edge"><title>input:6-&gt;output:8</title>
+<path fill="none" stroke="#586e75" d="M187,-66C187,-38.9788 233.006,-55.5992 243.07,-38.1246"></path>
+<polygon fill="#586e75" stroke="#586e75" points="245.875,-38.4305 245,-30 240.427,-37.1364 245.875,-38.4305"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge10" class="edge"><title>input:7-&gt;output:9</title>
+<path fill="none" stroke="#586e75" d="M216,-66C216,-38.9788 262.006,-55.5992 272.07,-38.1246"></path>
+<polygon fill="#586e75" stroke="#586e75" points="274.875,-38.4305 274,-30 269.427,-37.1364 274.875,-38.4305"></polygon>
+</g>
+</g>
+</svg>
+
+<p>In particular, there’s no longer a simple relationship between the offsets in the input and output log. Our simple recovery scheme no longer works – we can check the latest offset in the output log, but that’s doesn’t tell us what the input offset should be. The high-level consumer has exactly the opposite issue: we know what the input offset was at the time of the commit, but we can’t infer the output offset. The commit is asynchronous, so the output offset at the time of the commit is not even necessarily the output offset at the time of the failure.</p>
+<p>To get an exactly-once behaviour for this, we can use a hybrid approach. Instead of committing only the input offset, we commit both the input and output offsets together. If that commit pointed right to the end of the output log, we’d be done – our current offsets would be consistent, and we could pick up where we left off. However, since we commit after processing input and sending messages, the commit’s very likely to be stale.</p>
+<svg width="305pt" height="104pt" viewBox="0.00 0.00 305.05 104.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 100)">
+<title>stale</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-100 301.045,-100 301.045,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="9.04513,-66.5 9.04513,-95.5 297.045,-95.5 297.045,-66.5 9.04513,-66.5"></polygon>
+<text text-anchor="middle" x="23.0451" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="37.0451,-66.5 37.0451,-95.5 "></polyline>
+<text text-anchor="middle" x="51.5451" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="66.0451,-66.5 66.0451,-95.5 "></polyline>
+<text text-anchor="middle" x="80.5451" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="95.0451,-66.5 95.0451,-95.5 "></polyline>
+<text text-anchor="middle" x="109.545" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="124.045,-66.5 124.045,-95.5 "></polyline>
+<text text-anchor="middle" x="138.545" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="153.045,-66.5 153.045,-95.5 "></polyline>
+<text text-anchor="middle" x="167.045" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="181.045,-66.5 181.045,-95.5 "></polyline>
+<text text-anchor="middle" x="195.545" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="210.045,-66.5 210.045,-95.5 "></polyline>
+<text text-anchor="middle" x="224.545" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="239.045,-66.5 239.045,-95.5 "></polyline>
+<text text-anchor="middle" x="253.545" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="268.045,-66.5 268.045,-95.5 "></polyline>
+<text text-anchor="middle" x="282.545" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="9.04513,-0.5 9.04513,-29.5 239.045,-29.5 239.045,-0.5 9.04513,-0.5"></polygon>
+<text text-anchor="middle" x="23.0451" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="37.0451,-0.5 37.0451,-29.5 "></polyline>
+<text text-anchor="middle" x="51.5451" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="66.0451,-0.5 66.0451,-29.5 "></polyline>
+<text text-anchor="middle" x="80.5451" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="95.0451,-0.5 95.0451,-29.5 "></polyline>
+<text text-anchor="middle" x="109.545" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="124.045,-0.5 124.045,-29.5 "></polyline>
+<text text-anchor="middle" x="138.045" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="152.045,-0.5 152.045,-29.5 "></polyline>
+<text text-anchor="middle" x="166.545" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="181.045,-0.5 181.045,-29.5 "></polyline>
+<text text-anchor="middle" x="195.545" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="210.045,-0.5 210.045,-29.5 "></polyline>
+<text text-anchor="middle" x="224.545" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:0:sw-&gt;output:0:nw</title>
+<path fill="none" stroke="none" d="M9.04513,-66C-0.235645,-56.7192 -1.90328,-46.053 4.04221,-36.2743"></path>
+<polygon fill="none" stroke="none" points="6.24685,-38.0006 9.04513,-30 1.86835,-34.5094 6.24685,-38.0006"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge2" class="edge"><title>input:4:se-&gt;output:7:nw</title>
+<path fill="none" stroke="#268bd2" d="M159.311,-60.3397C175.306,-47.4111 187.954,-48.5447 203.977,-35.4998"></path>
+<polygon fill="#268bd2" stroke="#268bd2" points="157.105,-58.5596 153.045,-66 160.859,-62.7152 157.105,-58.5596"></polygon>
+<polygon fill="#268bd2" stroke="#268bd2" points="205.998,-37.4471 210.045,-30 202.237,-33.2977 205.998,-37.4471"></polygon>
+</g>
+</g>
+</svg>
+
+<p>If we restarted processing from a stale commit, some data would be duplicated in the output. If our task has written <strong>n</strong> messages since the last commit, simply restarting from that commit would write those <strong>n</strong> messages a second time. But if our task is the only producer for that partition, it’s easy to calculate the value of <strong>n</strong>… and by starting from the commit, and then dropping the first <strong>n</strong> messages of output we create, we can get ourselves back to a consistent state.</p>
+<svg width="322pt" height="104pt" viewBox="0.00 0.00 322.49 104.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 100)">
+<title>%3</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-100 318.486,-100 318.486,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="8.48617,-66.5 8.48617,-95.5 296.486,-95.5 296.486,-66.5 8.48617,-66.5"></polygon>
+<text text-anchor="middle" x="22.4862" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="36.4862,-66.5 36.4862,-95.5 "></polyline>
+<text text-anchor="middle" x="50.9862" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="65.4862,-66.5 65.4862,-95.5 "></polyline>
+<text text-anchor="middle" x="79.9862" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="94.4862,-66.5 94.4862,-95.5 "></polyline>
+<text text-anchor="middle" x="108.986" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="123.486,-66.5 123.486,-95.5 "></polyline>
+<text text-anchor="middle" x="137.986" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="152.486,-66.5 152.486,-95.5 "></polyline>
+<text text-anchor="middle" x="166.486" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="180.486,-66.5 180.486,-95.5 "></polyline>
+<text text-anchor="middle" x="194.986" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="209.486,-66.5 209.486,-95.5 "></polyline>
+<text text-anchor="middle" x="223.986" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="238.486,-66.5 238.486,-95.5 "></polyline>
+<text text-anchor="middle" x="252.986" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="267.486,-66.5 267.486,-95.5 "></polyline>
+<text text-anchor="middle" x="281.986" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="8.48617,-0.5 8.48617,-29.5 238.486,-29.5 238.486,-0.5 8.48617,-0.5"></polygon>
+<text text-anchor="middle" x="22.4862" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="36.4862,-0.5 36.4862,-29.5 "></polyline>
+<text text-anchor="middle" x="50.9862" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="65.4862,-0.5 65.4862,-29.5 "></polyline>
+<text text-anchor="middle" x="79.9862" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="94.4862,-0.5 94.4862,-29.5 "></polyline>
+<text text-anchor="middle" x="108.986" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="123.486,-0.5 123.486,-29.5 "></polyline>
+<text text-anchor="middle" x="137.486" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="151.486,-0.5 151.486,-29.5 "></polyline>
+<text text-anchor="middle" x="165.986" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="180.486,-0.5 180.486,-29.5 "></polyline>
+<text text-anchor="middle" x="194.986" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="209.486,-0.5 209.486,-29.5 "></polyline>
+<text text-anchor="middle" x="223.986" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:0:sw-&gt;output:0:nw</title>
+<path fill="none" stroke="none" d="M3.48325,-59.7257C-1.16167,-52.0861 -1.1599,-43.9048 3.48856,-36.2656"></path>
+<polygon fill="none" stroke="none" points="1.30938,-61.4906 8.48617,-66 5.68789,-57.9994 1.30938,-61.4906"></polygon>
+<polygon fill="none" stroke="none" points="5.6866,-38.0002 8.48617,-30 1.30865,-34.5082 5.6866,-38.0002"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge2" class="edge"><title>input:4:se-&gt;output:7:nw</title>
+<path fill="none" stroke="#268bd2" d="M158.752,-60.3397C174.747,-47.4111 187.395,-48.5447 203.418,-35.4998"></path>
+<polygon fill="#268bd2" stroke="#268bd2" points="156.546,-58.5596 152.486,-66 160.3,-62.7152 156.546,-58.5596"></polygon>
+<polygon fill="#268bd2" stroke="#268bd2" points="205.439,-37.4471 209.486,-30 201.678,-33.2977 205.439,-37.4471"></polygon>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge5" class="edge"><title>input:6:s-&gt;output:7:n</title>
+<path fill="none" stroke="#dc322f" d="M195.486,-66C195.486,-48.0226 217.689,-49.6734 223.24,-36.603"></path>
+<ellipse fill="none" stroke="#dc322f" cx="223.893" cy="-33.1445" rx="3.20001" ry="3.20001"></ellipse>
+</g>
+<!-- recover -->
+<g id="node3" class="node"><title>recover</title>
+<polygon fill="none" stroke="black" points="256.486,-0.5 256.486,-29.5 314.486,-29.5 314.486,-0.5 256.486,-0.5"></polygon>
+<text text-anchor="middle" x="270.986" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="285.486,-0.5 285.486,-29.5 "></polyline>
+<text text-anchor="middle" x="299.986" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;recover -->
+<g id="edge3" class="edge"><title>input:6:s-&gt;recover:8:n</title>
+<path fill="none" stroke="#586e75" d="M195.486,-66C195.486,-32.203 258.149,-61.0053 268.92,-37.9676"></path>
+<polygon fill="#586e75" stroke="#586e75" points="271.69,-38.3899 270.486,-30 266.195,-37.3095 271.69,-38.3899"></polygon>
+</g>
+<!-- input&#45;&gt;recover -->
+<g id="edge4" class="edge"><title>input:7:s-&gt;recover:9:n</title>
+<path fill="none" stroke="#586e75" d="M224.486,-66C224.486,-31.8363 287.985,-61.2775 298.899,-38.0459"></path>
+<polygon fill="#586e75" stroke="#586e75" points="301.685,-38.3907 300.486,-30 296.191,-37.3067 301.685,-38.3907"></polygon>
+</g>
+</g>
+</svg>
+
+<p>This has almost exactly the same performance characteristics as the existing high-level consumer. It does one extra request at the beginning to get the upcoming offset in the output stream, but after that it’s actually a little bit faster – it gets to throw away the duplicate output messages instead of writing them to the network.</p>
+<h3 id="checkpoints-and-changelogs">Checkpoints and Changelogs</h3>
+<p>So far we’ve only talked about processing that’s totally stateless – each message in the input stream gets handled separately. There’s another large class of jobs where we want to accumulate some state between messages: calculating statistics, running a state machine, or some other calculation that uses past history to affect the current processing.</p>
+<p>Again, our last technique doesn’t quite work: we can recover our position in the input from the commit, but we can’t infer the current state without replaying all the messages. You might think that we could just add to state to the commit – and, actually, you’d be completely right:</p>
+<svg width="296pt" height="119pt" viewBox="0.00 0.00 296.00 119.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 115)">
+<title>%3</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-115 292,-115 292,4 -4,4"></polygon>
+<!-- input -->
+<g id="node1" class="node"><title>input</title>
+<polygon fill="none" stroke="black" points="0,-81.5 0,-110.5 288,-110.5 288,-81.5 0,-81.5"></polygon>
+<text text-anchor="middle" x="14" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-81.5 28,-110.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-81.5 57,-110.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-81.5 86,-110.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-81.5 115,-110.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-81.5 144,-110.5 "></polyline>
+<text text-anchor="middle" x="158" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-81.5 172,-110.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-81.5 201,-110.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-81.5 230,-110.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-92.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-81.5 259,-110.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-92.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="0,-0.5 0,-29.5 288,-29.5 288,-0.5 0,-0.5"></polygon>
+<text text-anchor="middle" x="14" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-0.5 28,-29.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-0.5 57,-29.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-0.5 86,-29.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-0.5 144,-29.5 "></polyline>
+<text text-anchor="middle" x="158" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-0.5 172,-29.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-0.5 201,-29.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-0.5 230,-29.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-0.5 259,-29.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input:6:sw-&gt;output:6:nw</title>
+<path fill="none" stroke="#268bd2" d="M166.741,-74.8643C156.223,-60.2817 157.976,-44.0243 172,-30"></path>
+<polygon fill="#268bd2" stroke="#268bd2" points="164.668,-76.7481 172,-81 168.92,-73.1037 164.668,-76.7481"></polygon>
+<text text-anchor="middle" x="193.5" y="-51.8" font-family "" font-size="14.00" fill="#268bd2">  count: 6</text>
+</g>
+</g>
+</svg>
+
+<p>When the commit is restored, we have our processing state at that moment, and we can continue as usual.</p>
+<p>This attaches the full state to every commit, so it’s important that the state stays small: while writing out a handful of counts is no big deal, reserializing and resending a large data structure every few seconds could quickly grow to dominate the processing time. Many stream-processing tasks can have gigabytes worth of state; at that scale, putting the full state in each commit is totally impractical.</p>
+<p>One way to deal with this is to introduce a ‘changelog’ – every operation on the state gets logged out, and we can recover the current state just by replaying the log. Many databases use a changelog to handle replication, and the Samza framework uses changelogs to recover from node failures. When the state is large, this is <em>much</em> cheaper than frequently reserializing the entire state. Of course, this isn’t free: recreating state by replaying a changelog is generally slower than restoring a checkpoint. You also need to be careful that all the operations in the changelog are deterministic; if not, the recovered state could diverge arbitrarily far from the original. (This is a general concern with changelogs; for example, <a href="http://dev.mysql.com/doc/refman/5.1/en/replication-features-functions.html">MySQL’s statement replication</a> diverges when using random numbers or the current time.)</p>
+<p>Adding exactly-once semantics on top of a changelog turns out to be fairly straightforward: instead of attaching our state to the committed offsets, like the checkpoint style does, we attach the offsets to the changelog messages. Once we restore the changelog, not only do we have a consistent state, we also have the right offsets for that state – and we can continue processing without duplicating any messages or updating the state twice.</p>
+<h3 id="log-as-coordination">Log as Coordination</h3>
+<p>So far, we’ve only been processing a single input stream at a time. In the Real World, however, it’s common to want to read from many sources at once – perhaps you want to do a stream join, or just to aggregate statistics for a bunch of streams together. The simplest instance of this is a ‘merge’ operation, where we just interleave the messages together.</p>
+<svg width="383pt" height="170pt" viewBox="0.00 0.00 383.00 170.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 166)">
+<title>merge</title>
+<polygon fill="white" stroke="none" points="-4,4 -4,-166 379,-166 379,4 -4,4"></polygon>
+<!-- input0 -->
+<g id="node1" class="node"><title>input0</title>
+<polygon fill="none" stroke="black" points="58,-132.5 58,-161.5 346,-161.5 346,-132.5 58,-132.5"></polygon>
+<text text-anchor="middle" x="72" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-132.5 86,-161.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-132.5 115,-161.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-132.5 144,-161.5 "></polyline>
+<text text-anchor="middle" x="158.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="173,-132.5 173,-161.5 "></polyline>
+<text text-anchor="middle" x="187.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="202,-132.5 202,-161.5 "></polyline>
+<text text-anchor="middle" x="216" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-132.5 230,-161.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-132.5 259,-161.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="288,-132.5 288,-161.5 "></polyline>
+<text text-anchor="middle" x="302.5" y="-143.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="317,-132.5 317,-161.5 "></polyline>
+<text text-anchor="middle" x="331.5" y="-143.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output -->
+<g id="node2" class="node"><title>output</title>
+<polygon fill="none" stroke="black" points="0,-66.5 0,-95.5 288,-95.5 288,-66.5 0,-66.5"></polygon>
+<text text-anchor="middle" x="14" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="28,-66.5 28,-95.5 "></polyline>
+<text text-anchor="middle" x="42.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="57,-66.5 57,-95.5 "></polyline>
+<text text-anchor="middle" x="71.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="86,-66.5 86,-95.5 "></polyline>
+<text text-anchor="middle" x="100.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-66.5 115,-95.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-66.5 144,-95.5 "></polyline>
+<text text-anchor="middle" x="158" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="172,-66.5 172,-95.5 "></polyline>
+<text text-anchor="middle" x="186.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="201,-66.5 201,-95.5 "></polyline>
+<text text-anchor="middle" x="215.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="230,-66.5 230,-95.5 "></polyline>
+<text text-anchor="middle" x="244.5" y="-77.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-66.5 259,-95.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-77.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- input0&#45;&gt;output -->
+<g id="edge1" class="edge"><title>input0:0:s-&gt;output:0:n</title>
+<path fill="none" stroke="#586e75" d="M72,-132C72,-104.979 25.9937,-121.599 15.9298,-104.125"></path>
+<polygon fill="#586e75" stroke="#586e75" points="18.573,-103.136 14,-96 13.1246,-104.431 18.573,-103.136"></polygon>
+</g>
+<!-- input0&#45;&gt;output -->
+<g id="edge2" class="edge"><title>input0:1:s-&gt;output:3:n</title>
+<path fill="none" stroke="#586e75" d="M100,-132C100,-119.125 100,-114.02 100,-104.181"></path>
+<polygon fill="#586e75" stroke="#586e75" points="102.8,-104 100,-96 97.2001,-104 102.8,-104"></polygon>
+</g>
+<!-- input0&#45;&gt;output -->
+<g id="edge3" class="edge"><title>input0:2:s-&gt;output:4:n</title>
+<path fill="none" stroke="#586e75" d="M129,-132C129,-119.125 129,-114.02 129,-104.181"></path>
+<polygon fill="#586e75" stroke="#586e75" points="131.8,-104 129,-96 126.2,-104 131.8,-104"></polygon>
+</g>
+<!-- input0&#45;&gt;output -->
+<g id="edge4" class="edge"><title>input0:3:s-&gt;output:6:n</title>
+<path fill="none" stroke="#586e75" d="M158,-132C158,-114.665 178.646,-115.581 185.097,-103.949"></path>
+<polygon fill="#586e75" stroke="#586e75" points="187.861,-104.432 187,-96 182.414,-103.128 187.861,-104.432"></polygon>
+</g>
+<!-- input0&#45;&gt;output -->
+<g id="edge5" class="edge"><title>input0:4:s-&gt;output:9:n</title>
+<path fill="none" stroke="#586e75" d="M187,-132C187,-93.2595 261.565,-131.26 272.633,-103.911"></path>
+<polygon fill="#586e75" stroke="#586e75" points="275.397,-104.36 274,-96 269.879,-103.407 275.397,-104.36"></polygon>
+</g>
+<!-- input1 -->
+<g id="node3" class="node"><title>input1</title>
+<polygon fill="none" stroke="black" points="87,-0.5 87,-29.5 375,-29.5 375,-0.5 87,-0.5"></polygon>
+<text text-anchor="middle" x="101" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="115,-0.5 115,-29.5 "></polyline>
+<text text-anchor="middle" x="129.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="144,-0.5 144,-29.5 "></polyline>
+<text text-anchor="middle" x="158.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="173,-0.5 173,-29.5 "></polyline>
+<text text-anchor="middle" x="187.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="202,-0.5 202,-29.5 "></polyline>
+<text text-anchor="middle" x="216.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="231,-0.5 231,-29.5 "></polyline>
+<text text-anchor="middle" x="245" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="259,-0.5 259,-29.5 "></polyline>
+<text text-anchor="middle" x="273.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="288,-0.5 288,-29.5 "></polyline>
+<text text-anchor="middle" x="302.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="317,-0.5 317,-29.5 "></polyline>
+<text text-anchor="middle" x="331.5" y="-11.3" font-family "" font-size="14.00"> </text>
+<polyline fill="none" stroke="black" points="346,-0.5 346,-29.5 "></polyline>
+<text text-anchor="middle" x="360.5" y="-11.3" font-family "" font-size="14.00"> </text>
+</g>
+<!-- output&#45;&gt;input1 -->
+<g id="edge6" class="edge"><title>output:1:s-&gt;input1:0:n</title>
+<path fill="none" stroke="#586e75" d="M43.963,-57.789C54.2004,-40.1743 101,-57.3584 101,-30"></path>
+<polygon fill="#586e75" stroke="#586e75" points="41.137,-57.5682 42,-66 46.5835,-58.8703 41.137,-57.5682"></polygon>
+</g>
+<!-- output&#45;&gt;input1 -->
+<g id="edge7" class="edge"><title>output:2:s-&gt;input1:1:n</title>
+<path fill="none" stroke="#586e75" d="M72.9298,-57.8754C82.9937,-40.4008 129,-57.0212 129,-30"></path>
+<polygon fill="#586e75" stroke="#586e75" points="70.1246,-57.5695 71,-66 75.573,-58.8636 70.1246,-57.5695"></polygon>
+</g>
+<!-- output&#45;&gt;input1 -->
+<g id="edge8" class="edge"><title>output:5:s-&gt;input1:2:n</title>
+<path fill="none" stroke="#586e75" d="M158,-57.8195C158,-47.9797 158,-42.875 158,-30"></path>
+<polygon fill="#586e75" stroke="#586e75" points="155.2,-58 158,-66 160.8,-58 155.2,-58"></polygon>
+</g>
+<!-- output&#45;&gt;input1 -->
+<g id="edge9" class="edge"><title>output:7:s-&gt;input1:3:n</title>
+<path fill="none" stroke="#586e75" d="M214.097,-58.0513C207.646,-46.4195 187,-47.3354 187,-30"></path>
+<polygon fill="#586e75" stroke="#586e75" points="211.414,-58.8717 216,-66 216.861,-57.5679 211.414,-58.8717"></polygon>
+</g>
+<!-- output&#45;&gt;input1 -->
+<g id="edge10" class="edge"><title>output:8:s-&gt;input1:4:n</title>
+<path fill="none" stroke="#586e75" d="M243.097,-58.0513C236.646,-46.4195 216,-47.3354 216,-30"></path>
+<polygon fill="#586e75" stroke="#586e75" points="240.414,-58.8717 245,-66 245.861,-57.5679 240.414,-58.8717"></polygon>
+</g>
+</g>
+</svg>
+
+<p>To keep things snappy, we’d like our task to process messages as soon as they arrive. This introduces an element of nondeterminism: arrival order depends on network latency and many other factors, so a number of different interleavings are possible. Our last strategy involved restoring to a stale checkpoint and replaying the input – but in a nondeterministic world, it’s no longer obvious what order to replay the input in.</p>
+<p>To compensate for this, we’ll need to introduce an additional log. This ‘merge log’ doesn’t actually contain any of the input or output data – it just records the order in which the input arrives. (“One message from input-1”, “One message from input-2”, and so on.) When a new input arrives at our task, we write it to the merge log first; once Kafka confirms the write, we can publish the data to our output stream. When we commit the offsets, we record the current offset in the merge log as well.</p>
+<p>Given this metadata, crash recovery is straightforward. When our task restores the commit after a failure, it returns to a consistent (but stale) state. In particular, since the commit is asynchronous, our offset in the merge log is likely to behind the tip. At this point, we can step forward in the merge log, replaying the input in exactly the same order; once we’ve reached the tip of the merge log, recovery is complete, and we can resume normal processing from there. In effect, the merge log has imposed an order on our input logs: as far as our actual processing code is concerned, it’s no different than if all the input came from a single deterministically-ordered log.</p>
+<p>In <a href="http://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying"><em>The Log</em></a>, Jay Kreps refers to this sort of thing as “squeezing the non-determinism out of the input stream.” This technique is very powerful; it’s one reason so many databases and consensus algorithms are built on top of a log. In many of those systems, this log comes with a bottleneck; all operations are totally ordered in the same log, so there’s a lot of contention for a single resource. Here, however, a single log only coordinates between a single task and a few different inputs – so we can scale horizontally without needing any global coordination.</p>
+<h3 id="repartitioning-and-deduplication">Repartitioning and Deduplication</h3>
+<p>So far, all the techniques we’ve discussed have dealt with a small number of partitions at a time. It’s normally straightforward to extend this to entire topics: for example, to merge two topics with the same number of partitions, we can just merge each pair of partitions together.</p>
+<p>However, there’s one case where this ‘partitionwise’ approach doesn’t work. A lot of stream processing jobs are ‘locality sensitive’: if you have a topic full of page view events, and you want to count all the visits to each individual page, it helps to have all the visits for a page in the same partition. Kafka calls this <a href="http://kafka.apache.org/documentation.html#theproducer">semantic partitioning</a>, and the producer API is explicitly designed to support it.</p>
+<p>Of course, a single topic can only be partitioned in one way – but if there are multiple consumers interested in the data, they might need their input partitioned in different ways. (If we tried to count all the page views by source IP, for example, an input stream partitioned by page URL is not very useful.) As a result, it’s quite common to find jobs that take all the messages in some input topic and repartitions them in to some more convenient arrangement. There’s no way to split this work up by partition: data from each input partition may end up in any output partition, and each output partition may be written to concurrently by any number of tasks. Since each output partition no longer has a single writer, it’s not possible for a failed task to just check the offset to know if its writes were successful or not, so we can’t make the producer idempotent – if a task fails, some messages will be written to the output more than once.</p>
+<p>Thankfully, all is not lost. While these messages may be duplicated in Kafka, it’s still possible to deduplicate them on the client. The simplest fix is to add a little metadata to each message: the message’s partition and offset in the source topic. The consumers will need to remember the largest offset they’ve seen for each source partition; if an incoming message’s offset is smaller, it’s a duplicate, and it can be safely discarded.</p>
+<p>This works, but the cost is high. In all the previous sections, the output topic has been ‘pristine’, with no duplicates or extra metadata in the log. This is a really useful property: any consumer that speaks the Kafka protocol can consume that topic without any special logic, and it works seamlessly with existing tools. To make our regrouping work, we had to leak some additional metadata into the log, and any consumers will need to clean this up – implementing the exact same deduplication logic and keeping extra state. This is the stream processing equivalent of “leaking implementation details into the interfacex,” and it’s just as painful.</p>
+<p>If there’s only a small number of downstream consumers, we might be happy to live with this. Otherwise, it’s straightforward to insert a second ‘cleanup’ job after the first which just copies our regrouped topic into a new output topic. This cleanup job only needs to deal with a single input and output partition at a time, so it can use the ‘idempotent producer’-style techniques to take our messy regrouped topic and write out a ‘pristine’ version. This obviously has some significant overhead, but it still scales well, and it’s sometimes worth it to make life easier for downstream systems.</p>
+<h3 id="going-forward">Going Forward</h3>
+<p>I’m really excited about the future of Kafka. I suspect that, in the next few years, we’ll recognize the Kafka-style log as as fundamental as distributed filesystems or key value stores – and it’s already become the best choice for a wide variety of tasks. There are some downsides to living on the cutting edge, though: you’re missing a lot of the libraries and tooling you expect from a mature technology, and its limits and possibilities aren’t as broadly known or well-explored. The community’s working hard and fast, but some major avenues still remain mostly unexplored.</p>
+<p>To that end, I’ve been working on <a href="https://github.com/bkirwi/coast"><code>coast</code></a> – a high-level streaming framework with an exactly-once semantics. (Most of the ideas in this post were collected or solidified as part of that project.) It’s still early days, but it’s shaping up into something I’m quite excited about; if you’re interested, I’d be delighted if you followed along.</p>
+</article>
+<footer>
+  <p>
+  No comments here! 
+
+  Feel free to get in touch on <a href="https://github.com/bkirwi">
+    GitHub</a> or <a href="https://twitter.com/bkirwi">Twitter</a>.
+  </p>
+<footer>
+
+    </div>
+  </body>
+</html>

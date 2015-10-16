@@ -1,0 +1,111 @@
+header {
+/*   font-variant: small-caps; */
+  overflow: auto;
+}
+
+header:after {
+  clear: both;
+}
+  
+h1 {
+  font-size: 3em;
+  line-height: 1.2em;
+  margin-bottom: -0.2em;
+}
+
+header h1 {
+  font-size: 3.5em;
+}
+
+footer {
+  font-size: 0.9em;
+  font-style: italic;
+  padding: 1em;
+}
+
+
+h3 {
+  margin-top: 2em; 
+}
+
+div.content {
+  margin: 0 auto;
+  max-width: 40em;
+  padding: 1em;
+  border-width:0px;
+}
+
+body {
+  color: #002b36;
+  font-family: 'Droid Serif', serif;
+  font-size: 16px;
+  font-size-adjust: 0.5;
+}
+
+article {
+  line-height: 180%;
+/* text-align: justify; */
+}
+
+sup {
+  line-height: 0;
+}
+
+code {
+  font-family: 'Source Code Pro', 'Droid Mono', monospace;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 0.01em 1em;
+}
+
+svg {
+  margin: 1em;
+  font-family: 'Source Code Pro', 'Droid Mono', monospace !important;
+}
+
+a:link {
+  color: #268BD2;
+  text-decoration: none;
+}
+
+a:visited {
+  color: #DC322F;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+h1 a, h2 a, h3 a {
+  color: #002b36 !important;
+  text-decoration: none;
+}
+
+header img {
+  float: left;
+  margin: 1em;
+}
+
+nav {
+  margin: 1em;
+}
+
+nav ul {
+  margin: 26px 0.5em;
+}
+
+nav li {
+  margin: 0px 0.2em;
+  list-style-type: none;
+  display: inline;
+  font-size: 1em;
+  font-weight: bold;
+  font-family: 'Droid Sans', sans-serif;
+}
+
+nav li a {
+  color: #002b36 !important;
+}

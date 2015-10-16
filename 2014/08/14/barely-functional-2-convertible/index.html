@@ -1,0 +1,288 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> Barely Functional #2 | ben.kirw.in </title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css"></link>
+    <link rel="stylesheet" type="text/css" href="/css/kate-highlighting.css"></link>
+    <!--
+    <link href='http://fonts.googleapis.com/css?family=Open+Sans' rel='stylesheet' type='text/css'>
+    <link href='http://fonts.googleapis.com/css?family=PT+Sans+Narrow:700' rel='stylesheet' type='text/css'>
+    -->
+  </head>
+  <body>
+    <div class="content">
+      <header>
+        <img src="/img/construction.gif"></img>
+        <nav><ul>
+          <li><a href="/">home</a></li>
+          <li><a href="/about/">about</a></li>
+        </ul></nav>
+      </header>
+      <article>
+  <h1> Barely Functional #2 </h1>
+  <h2> Structuring Data and Scrapping Boilerplate </h2>
+  <p>This is my second post on a Haskell codebase I’ve been working on – a reimplementation of the <a href="https://ethereum.org/">Ethereum cryptocurrency / application platform</a> in Haskell. (If you missed it, you might want to read <a href="/2014/06/24/barely-functional-1-rlp/">the original post</a> first.) Like last time, we’ll take some ideas from the original project, look at how they translate into Haskell, and compare things with one of the official implementations.</p>
+<p>Last time we looked at the ‘RLP encoding’, a JSON-like data representation format that’s used heavily in Ethereum. As I’ve fleshed out the rest of the project, I’ve also built up a small library of support code that makes this representation much easier to deal with. In this post we’ll go through a few different iterations of the library, with a short walkthrough of <code>GHC.Generics</code> and some comments on working with type classes.</p>
+<h3 id="round-1-type-classes-and-convertibles">Round 1: Type Classes and Convertibles</h3>
+<p>The last post revolved around a simple data type called <code>Item</code>:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Item</span> <span class="fu">=</span> <span class="dt">String</span> <span class="dt">ByteString</span> <span class="fu">|</span> <span class="dt">List</span> [<span class="dt">Item</span>]</code></pre></div>
+<p>We also looked at a couple functions that translate back and forth between <code>Item</code>s and strings of bytes:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">encode ::</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">ByteString</span>
+<span class="ot">decode ::</span> <span class="dt">ByteString</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> <span class="dt">Item</span></code></pre></div>
+<p>Together, these make up the RLP encoding. RLP is used everywhere in Ethereum: to define the messaging protocol, to calculate hashes of data, and as part of the mining algorithm itself. Almost every structure mentioned in the specification comes with a canonical representation in RLP. This is a lot like the way JSON is often used: at the ‘edges’ of a system, it’s often useful to be able to handle many data types generically, and this sort of intermediate representation is very useful.</p>
+<p>While JSON’s a common representation on the wire, it’s very rarely a nice structure to use internally, being simultaneously too specific (supporting only a small set of types) and too general (allowing more structures than our application expects). It’s therefore common to validate JSON at the edges of our system, converting it to more appropriate structures for internal use. In Haskell, with its culture of expressive types and static checking, this is even more important – no use in having a nice typesystem if everything has the same type!</p>
+<p>For this to work, though, moving back and forth needs to be easy, or you risk drowning out your important logic in a sea of manual conversions. In the wildly popular <code>aeson</code> library, this need is handled by a couple of classes: <code>ToJSON</code> and <code>FromJSON</code>. To implement these classes for a type, you need to provide functions to convert back and forth between your type and <code>aeson</code>’s representation of a JSON value. In return, you get a standard conversion interface across all types; you also get to write functionality that works for everything with a JSON representation, which is occasionally very useful indeed.</p>
+<p>I started off with a slightly simplified version of that approach. Since I didn’t need the flexibility of separate ‘to’ and ‘from’ classes, I collapsed things down to one:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">class</span> <span class="dt">Convertible</span> a <span class="kw">where</span>
+<span class="ot">  toItem ::</span> a <span class="ot">-&gt;</span> <span class="dt">Item</span>
+<span class="ot">  fromItem ::</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a</code></pre></div>
+<p>This looks a lot like the types of the <code>encode</code> and <code>decode</code> functions above: <code>toItem</code> converts our type <code>a</code> into an RLP <code>Item</code>; and <code>fromItem</code> tries to convert it back, returning <code>Nothing</code> if it can’t make sense of the input.</p>
+<p>A few instances are particularly obvious:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="co">-- We can represent an Item as itself</span>
+<span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Item</span> <span class="kw">where</span>
+  toItem item <span class="fu">=</span> item
+  fromItem item <span class="fu">=</span> <span class="dt">Just</span> item
+
+<span class="co">-- A ByteString just needs to be wrapped / unwrapped</span>
+<span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">ByteString</span> <span class="kw">where</span>
+  toItem bs <span class="fu">=</span> <span class="dt">String</span> bs
+  fromItem (<span class="dt">String</span> bs) <span class="fu">=</span> <span class="dt">Just</span> bs
+  fromItem _ <span class="fu">=</span> <span class="dt">Nothing</span>
+
+<span class="co">-- If we can convert the elements, we can convert a list</span>
+<span class="kw">instance</span> <span class="dt">Convertible</span> a <span class="ot">=&gt;</span> <span class="dt">Convertible</span> [a] <span class="kw">where</span>
+  toItem xs <span class="fu">=</span> <span class="dt">List</span> <span class="fu">$</span> map toItem xs
+  fromItem (<span class="dt">List</span> xs) <span class="fu">=</span> mapM fromItem xs
+  fromItem _ <span class="fu">=</span> <span class="dt">Nothing</span></code></pre></div>
+<p>We can do the same for any type which has a well-defined representation in RLP. Here’s a quick one for a 32-byte hash:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">newtype</span> <span class="dt">Digest</span> <span class="fu">=</span> <span class="dt">Digest</span> <span class="dt">ByteString</span>
+
+<span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Digest</span> <span class="kw">where</span>
+  toItem (<span class="dt">Digest</span> bytes) <span class="fu">=</span> toItem bytes
+  fromItem item <span class="fu">=</span> <span class="kw">do</span>
+    bytes <span class="ot">&lt;-</span> fromItem item
+    guard <span class="fu">$</span> BS.length bytes <span class="fu">==</span> <span class="dv">32</span>
+    return <span class="fu">$</span> <span class="dt">Digest</span> bytes</code></pre></div>
+<p>Notice how we can use our existing <code>Convertible</code> instance for <code>ByteString</code> in our definition for <code>Digest</code>.</p>
+<p>Many libraries – <code>aeson</code>, <code>binary</code>, <code>cereal</code>, and so on down the alphabet – use type classes for this kind of conversion; the common structure and interface makes them simpler and more uniform to use. I was a bit surprised, though, at how it makes them significantly easier to <em>write</em>. Like <code>Digest</code> above, most of the conversions in the project lean heavily on other conversions for simpler types. Using the type class, the compiler chooses the right conversions for those pieces automatically – and the usual methods of composition in Haskell make it easy to put the whole thing together.</p>
+<h3 id="round-2-scrapping-boilerplate-with-ghc.generics">Round 2: Scrapping Boilerplate with GHC.Generics</h3>
+<p>With those basic building blocks in place, I started translating more data types and their RLP representations from the specification into Haskell. Here’s one that represents a peer in the Ethereum network:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Peer</span> <span class="fu">=</span> <span class="dt">Peer</span>
+  {<span class="ot"> peerAddress ::</span> <span class="dt">HostAddress</span>
+  ,<span class="ot"> peerPort ::</span> <span class="dt">Int</span>
+  ,<span class="ot"> peerUniqueId ::</span> <span class="dt">Digest</span>
+  }</code></pre></div>
+<p>This has a pretty direct encoding in RLP: our three-field structure translates to a three-element list, and each element translates using its own canonical representation. In a notation where <code>RLP(x)</code> is a function from <code>x</code> to its representation, this can be written a bit more formally.</p>
+<pre><code>RLP(peer) = [ RLP(address), RLP(port), RLP(id) ]</code></pre>
+<p>Assuming we’ve already defined <code>Convertible</code> for <code>HostAddress</code>, <code>Int</code>, and so on, we can write this out directly.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Peer</span> <span class="kw">where</span>
+  toItem (<span class="dt">Peer</span> address port id) <span class="fu">=</span> 
+    toItem [toItem address, toItem port, toItem id]
+  fromItem (<span class="dt">List</span> [address, port, id]) <span class="fu">=</span> 
+    <span class="dt">Peer</span> <span class="fu">&lt;$&gt;</span> fromItem address <span class="fu">&lt;*&gt;</span> fromItem port <span class="fu">&lt;*&gt;</span> fromItem id
+  fromItem _ <span class="fu">=</span> <span class="dt">Nothing</span></code></pre></div>
+<p>In some respects this is pretty nice; it’s easy to see how the Haskell data type corresponds to the RLP version, and the conversions for the field types are easy to reuse.</p>
+<p>After writing several such <code>Convertible</code> instances, though, this becomes less appealing. It turns out that <em>most</em> of the structures Ethereum defines use the equivalent encoding, where a n-field structure becomes an n-element list. Writing these instances requires very little thought – the translation between <code>Peer</code> and the corresponding <code>Item</code> is perfectly mechanical – but we still need to mention each field four times in a consistent order. This all adds up to quite a bit of code, with a correspondingly large error surface.</p>
+<p>I had hoped to sit down, hammer out all the instances, and move on to more fun and interesting things… but it turned out to be just too much, and I started looking for ways to abstract this out. In other languages we might reach for macros, or code generation, or runtime reflection. Haskell, on the other hand, has its own little cottage industry of ways to scrap exactly this variety of boilerplate. Right now, the most fashionable of these appears to be <code>GHC.Generics</code>.</p>
+<p><code>GHC.Generics</code> is composed of a few things:</p>
+<ul>
+<li>A small set of data types that, taken together, are rich enough to represent Haskell’s sum-of-products data declarations.</li>
+<li>A type class, <code>Generic a</code>, that allows you to convert between a type <code>a</code> and its generic representation. It’s like our <code>Convertible</code> type class above, with forward and backward conversion functions, except the type of the generic representation may vary depending on the type of <code>a</code>.</li>
+<li>A language extension, <code>DeriveGeneric</code>, that enables GHC to derive a correct representation automatically.</li>
+</ul>
+<p>Together, those are enough to translate from a custom data type to a generic version with very little effort. It’s still up to the programmer to write logic to use that representation for their specific task – but once that’s done, you have a function that works over a whole universe of data types.</p>
+<p>If you’re not familiar with <code>GHC.Generics</code>, you’ll want to peruse the <a href="http://hackage.haskell.org/package/base/docs/GHC-Generics.html">fairly extensive haddocks</a>, since I’ll address some things only glancingly. (It may help to follow along with their serialization example as we go, since the structure is similar to what we’re doing here.) If you’re not interested in the minutae of generic programming just yet, feel free to skip on ahead to the next section.</p>
+<p>The usual way to implement a new piece of generic functionality is to create a new type class with instances for each of the primitive <code>Generics</code> types; the compiler can then put these instances together to match the precise shape of a full generic representation. We’ll look at a generic function that captures the pattern we noticed above, where n-field constructors are converted to n-element lists and all the fields use their own canonical conversions. Since the constructor is the product in the sum-of-products representation, I’ve unimaginatively labelled this the ‘product’ representation for a type.</p>
+<p>Our new type class is based on the existing <code>Convertible</code> class, but with a few necessary changes. First, since our representation always has a list at the top level, the type class can be specialized a bit: the decoding function takes a list of items, and the encoding function returns a list. While decoding, we’ll sometimes find ourselves with both a partially-decoded value and some leftover input – this code takes the easy way out and passes the leftovers around explicitly. (Haskell’s standard <code>reads</code> function does the something similar.) At some points we’ll expect the input to be exhausted, though, so there’s a helper function that checks this and returns just the result.</p>
+<p>To be able to define the instances properly for the generic-representation types, the class also needs to be higher-kinded. This complicates type signatures slightly, but it has no effect on the implementation.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">class</span> <span class="dt">ConvertProduct</span> f <span class="kw">where</span>
+  <span class="co">-- Given a list of items, try and decode a value. We</span>
+  <span class="co">-- pass along any unused elements in the tail.</span>
+<span class="ot">  partialFromItems ::</span> [<span class="dt">Item</span>] <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (f a, [<span class="dt">Item</span>])
+  <span class="co">-- Convert a value into a list of items.</span>
+<span class="ot">  productToItems ::</span> f a <span class="ot">-&gt;</span> [<span class="dt">Item</span>]
+
+<span class="co">-- Like 'partialFromItems' above, but requires that </span>
+<span class="co">-- all input is used.</span>
+<span class="ot">productFromItems ::</span> <span class="dt">ConvertProduct</span> f <span class="ot">=&gt;</span> [<span class="dt">Item</span>] <span class="ot">-&gt;</span> <span class="dt">Maybe</span> (f a)
+productFromItems list <span class="fu">=</span> partialFromItems list <span class="fu">&gt;&gt;=</span> complete
+  <span class="kw">where</span>
+    complete (x, []) <span class="fu">=</span> <span class="dt">Just</span> x
+    complete _ <span class="fu">=</span> <span class="dt">Nothing</span></code></pre></div>
+<p>Now, we need to handle each case one-by-one. Let’s start with the simplest case: <code>U1</code>, which represents a constructor with zero fields. This maps pretty nicely to the empty list, and can ignore any input.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">ConvertProduct</span> <span class="dt">U1</span> <span class="kw">where</span>
+  partialFromItems x <span class="fu">=</span> <span class="dt">Just</span> (<span class="dt">U1</span>, x)
+  productToItems _ <span class="fu">=</span> []</code></pre></div>
+<p><code>K1 i a</code> represents a single field of type <code>a</code>. We want to use the canonical representations for the fields, so we require a <code>Convertible</code> instance for <code>a</code> and use it to handle a single element of our product.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">Convertible</span> a <span class="ot">=&gt;</span> <span class="dt">ConvertProduct</span> (<span class="dt">K1</span> i a) <span class="kw">where</span>
+  partialFromItems (item <span class="fu">:</span> rest) <span class="fu">=</span> <span class="kw">do</span>
+    x <span class="ot">&lt;-</span> fromItem item
+    return (<span class="dt">K1</span> x, rest)
+  partialFromItems [] <span class="fu">=</span> <span class="dt">Nothing</span>
+  productToItems (<span class="dt">K1</span> x) <span class="fu">=</span> [toItem x]</code></pre></div>
+<p><code>a :*: b</code> is used to encode products with more that one field; it’s isomorphic to the type of pairs <code>(a, b)</code>. (We can get products of more than two elements by nesting pairs.) When encoding, we just need to encode each half and concatenate. When decoding, we do first the left, then the right, threading the leftovers through.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> (<span class="dt">ConvertProduct</span> a, <span class="dt">ConvertProduct</span> b) <span class="ot">=&gt;</span> <span class="dt">ConvertProduct</span> (a <span class="fu">:*:</span> b) <span class="kw">where</span>
+  partialFromItems list <span class="fu">=</span> <span class="kw">do</span>
+    (a, rest0) <span class="ot">&lt;-</span> partialFromItems list
+    (b, rest1) <span class="ot">&lt;-</span> partialFromItems rest0
+    return (a <span class="fu">:*:</span> b, rest1)
+  productToItems (a <span class="fu">:*:</span> b) <span class="fu">=</span> productToItems a <span class="fu">++</span> productToItems b</code></pre></div>
+<p><code>a :+: b</code> is used to encode sum types (ie. types with more than one constructor) – it’s isomorphic to <code>Either a b</code>. As with pairs, data types with more than two constructors can be handled by nesting. This instance works by tring the first element in the sum first, falling back to the other one if that fails. Since the sum is always outermost, we expect no leftovers here.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> (<span class="dt">ConvertProduct</span> a, <span class="dt">ConvertProduct</span> b) <span class="ot">=&gt;</span> <span class="dt">ConvertProduct</span> (a <span class="fu">:+:</span> b) <span class="kw">where</span>
+  partialFromItems items <span class="fu">=</span> <span class="kw">do</span>
+    <span class="kw">let</span> left <span class="fu">=</span> <span class="dt">L1</span> <span class="fu">&lt;$&gt;</span> productFromItems items
+        right <span class="fu">=</span> <span class="dt">R1</span> <span class="fu">&lt;$&gt;</span> productFromItems items
+    product <span class="ot">&lt;-</span> left <span class="fu">&lt;|&gt;</span> right
+    return (product, [])
+  productToItems (<span class="dt">L1</span> left) <span class="fu">=</span> productToItems left
+  productToItems (<span class="dt">R1</span> right) <span class="fu">=</span> productToItems right</code></pre></div>
+<p>Finally, <code>M1</code> is just a carrier of metadata, with no associated structure. In our case, we can just ignore it.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">ConvertProduct</span> a <span class="ot">=&gt;</span> <span class="dt">ConvertProduct</span> (<span class="dt">M1</span> i c a) <span class="kw">where</span>
+  partialFromItems x <span class="fu">=</span> <span class="kw">do</span>
+    (y, rest) <span class="ot">&lt;-</span> partialFromItems x
+    return (<span class="dt">M1</span> y, rest)
+  productToItems (<span class="dt">M1</span> x) <span class="fu">=</span> productToItems x</code></pre></div>
+<p>Once all those instances have been defined, we can use this <code>ConvertProduct</code> class to provide a default implementation for <code>Convertible</code>. (Since that requires an extra couple classes, we need to add an explicit signature for the default implementation.)</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">{-# LANGUAGE DefaultSignatures #-}</span> 
+<span class="kw">import </span><span class="dt">GHC.Generics</span> <span class="kw">as</span> <span class="dt">G</span>
+
+<span class="kw">class</span> <span class="dt">Convertible</span> a <span class="kw">where</span>
+
+<span class="ot">  toItem ::</span> a <span class="ot">-&gt;</span> <span class="dt">Item</span>
+  default<span class="ot"> toItem ::</span> (<span class="dt">Generic</span> a, <span class="dt">ConvertProduct</span> (<span class="dt">Rep</span> a))
+                 <span class="ot">=&gt;</span> a <span class="ot">-&gt;</span> <span class="dt">Item</span>
+  toItem x <span class="fu">=</span> <span class="dt">List</span> <span class="fu">$</span> productToItems <span class="fu">$</span> G.from x
+
+<span class="ot">  fromItem ::</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a
+  default<span class="ot"> fromItem ::</span> (<span class="dt">Generic</span> a, <span class="dt">ConvertProduct</span> (<span class="dt">Rep</span> a))
+                   <span class="ot">=&gt;</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a
+  fromItem (<span class="dt">List</span> list) <span class="fu">=</span> G.to <span class="fu">&lt;$&gt;</span> productFromItems list
+  fromItem _ <span class="fu">=</span> <span class="dt">Nothing</span></code></pre></div>
+<p>Whew! That’s it for the generic implementation. Now all we need to do in our data declarations is derive <code>Generic</code> and instantiate the class.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">{-# LANGUAGE DeriveGeneric #-}</span> 
+<span class="kw">import </span><span class="dt">GHC.Generics</span>(<span class="dt">Generic</span>)
+
+<span class="kw">data</span> <span class="dt">Peer</span> <span class="fu">=</span> <span class="dt">Peer</span>
+  {<span class="ot"> peerAddress ::</span> <span class="dt">HostAddress</span>
+  ,<span class="ot"> peerPort ::</span> <span class="dt">Int</span>
+  ,<span class="ot"> peerUniqueId ::</span> <span class="dt">Digest</span>
+  } <span class="kw">deriving</span> <span class="dt">Generic</span>
+
+<span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Peer</span></code></pre></div>
+<p>That’s much better – the whole conversion is determined by the shape of the data and the conversions we’ve defined for the field types elsewhere, so there’s nothing extra to specify. If that default implementation doesn’t do what we want, it’s as easy as always to provide our own implementations.</p>
+<p>I had been vaguely familiar with <code>GHC.Generics</code> before starting on this – and I’d used <code>DeriveGeneric</code> once to derive some <code>aeson</code> instances for a record, which gave me some confidence I could do the same for RLP. I had almost no idea how it worked internally, though – most of the complexity of the generic functions is hidden from the client – so I was learning all this pretty much from scratch.</p>
+<p>I found (and still find) some of the types difficult to follow. All the representation types are higher-kinded, but the type argument is never used; many of the type constructors have several additional type parameters and a few type synonyms, but I needed only a small subset of them. I understand why this has to be there – that extra information is occasionally necessary – but it makes intimidating reading for a newcomer.</p>
+<p>Thankfully, a few things made this simpler than it could have been. Perhaps most importantly, the serialization example included in the docs is precisely my use-case: it takes advantage of the structure, but ignores the field names and other metadata. It was much easier to adapt that code than to write it up from scratch.</p>
+<p>I also got quite a bit of help from the compiler. While the variety of type parameters and aliases are daunting, they’re based on just a few concrete data types. There are only a few obvious ways to line these up – and once I got the structure right, type inference took care of the rest. It was also helpful that GHC was deriving the actual representation types: if I was missing a <code>ConvertProduct</code> instance, the compiler would complain and spit out exactly the bit of the representation it couldn’t handle yet. This made the correspondence between my data types and their generic representations more obvious, and made it simpler to build up the implementation piecemeal.</p>
+<p>All this work paid off – the code simplification elsewhere was dramatic. In the manual <code>Convertible</code> implementation for <code>Peer</code> above, we have to mention each field at least three times; in the second one it’s only mentioned once, right when it’s defined. Clearing out that redundant information leaves more space on the screen – and in the mind – for the code that actually matters.</p>
+<h3 id="round-3-splitting-out-a-value-level-converter">Round 3: Splitting Out a Value-Level Converter</h3>
+<p>This already covers a lot of ground, but as I got deeper into the spec, I found some important cases that it doesn’t cover. To tease these out, we’ll look at a simplified example from Ethereum’s messaging protocol. I’ve removed a handful of message types and fields, but all the relevant details should be there.</p>
+<p>The <code>Hello</code> message is sent as part of the handshake, and gives the peer some information about the sending host:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Hello</span> <span class="fu">=</span> <span class="dt">Hello</span>
+  {<span class="ot"> protocolVersion ::</span> <span class="dt">Int</span>
+  ,<span class="ot"> networkId ::</span> <span class="dt">Int</span>
+  <span class="co">-- etc.</span>
+  }</code></pre></div>
+<p><code>GetPeers</code> message asks the connected peer to info on other peers to connect to:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">GetPeers</span> <span class="fu">=</span> <span class="dt">GetPeers</span></code></pre></div>
+<p>The <code>Peers</code> message is the response, containing a list of known peers. (That <code>Peer</code> type in the list is the one we defined above.)</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Peers</span> <span class="fu">=</span> <span class="dt">Peers</span> [<span class="dt">Peer</span>]</code></pre></div>
+<p>And finally, the <code>Message</code> type has a union of the three. Incoming messages are typed as <code>Message</code>; we can pattern-match on the different constructors to recover the appropriate type.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Message</span> <span class="fu">=</span>
+    <span class="dt">HelloMsg</span> <span class="dt">Hello</span>
+  <span class="fu">|</span> <span class="dt">GetPeersMsg</span> <span class="dt">GetPeers</span>
+  <span class="fu">|</span> <span class="dt">PeersMsg</span> <span class="dt">Peers</span>
+  <span class="co">-- etc.</span></code></pre></div>
+<p>We can’t use our existing deriving mechanism here for a couple of reasons:</p>
+<ul>
+<li><p>To help discriminate between messages, Ethereum requires that each message is prepended with a distinct integer. (eg. <code>Hello</code> encodes as <code>[ 0x00, RLP(version), RLP(network id) ]</code>, and <code>GetPeers</code> as <code>[ 0x10 ]</code>. This is <em>almost</em> the same as the product representation we wrote above, but that code’s locked up in the type class.</p></li>
+<li><p>For some types with single-field constructors, we need to use <em>just</em> the encoding of that field. For example, <code>HelloMsg hello</code> should have precisely the same encoding as <code>hello</code> does, without any additional wrapping. (Our ‘product’ encoding would wrap the value up in a single-element list, but that doesn’t match the representation in the spec.)</p></li>
+<li><p>In some cases, we need <em>both</em> these behaviours. The <code>Peers</code> type is encoded as:</p>
+<p><code>[ 0x11, RLP(peer_0), RLP(peer_1), ... ]</code></p>
+<p>This is the RLP encoding of the underlying <code>[Peer]</code> list, with the integer prefix jammed on to <em>that</em>. We’ll need to combine the above two behaviours together somehow.</p></li>
+</ul>
+<p>While it would be possible – if tedious – to implement these cases by hand, it turns out it’s <em>also</em> possible to extend the <code>Convertible</code> machinery to make these definitions easy, and without making the common case more painful.</p>
+<p>The <code>Convertible</code> class, like all type classes in Haskell, does a few things: it groups a set of values into a ‘dictionary’, it ensures only one implementation exists for each type, and it passes that dictionary behind-the-scenes to functions that require it. The grouping of related functionality is useful: the encoding and decoding methods always come in pairs, so it makes sense to pass them around and operate on them together. Having an implementation that’s implicitly passed around is also pretty handy: Ethereum defines a canonical serialization for each type, so it’s useful that a client can just say <code>toItem whatever</code> and have the right conversion picked out automatically.</p>
+<p>On the other hand, the uniqueness restriction is a pain. Consider our <code>Hello</code> message, where the specified RLP encoding is the exactly like the ‘product’ encoding above, but with a single tag at the front of the list: it would be nice if we could just write a function that took a <code>Convertible</code> instance as input, returning a new one which prepends and strips the tag as necessary. But the only way to pass a type class as an argument is implicitly – and returning one is impossible.</p>
+<p>Like many problems in computing, this tension can be resolved by adding another layer of indirection. We define a new <code>Converter</code> data type which holds our two transformation functions, and reduce the <code>Convertible</code> class to a single function that returns a <code>Converter</code>. In this way, we can define as many <code>Converter</code>s as we like, and still mark one out as the canonical one. While we’re at it, we can factor out the default implementation to a top-level binding as well. Here’s the whole thing:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Converter</span> a <span class="fu">=</span> <span class="dt">Converter</span> 
+  {<span class="ot"> convertToRLP ::</span> a <span class="ot">-&gt;</span> <span class="dt">Item</span>
+  ,<span class="ot"> convertFromRLP ::</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a
+  }
+
+<span class="co">-- We can factor out the default 'product' conversion</span>
+<span class="ot">asProduct ::</span> (<span class="dt">Generic</span> a, <span class="dt">ConvertProduct</span> (<span class="dt">Rep</span> a))
+          <span class="ot">=&gt;</span> <span class="dt">Converter</span> a
+asProduct <span class="fu">=</span> <span class="dt">Converter</span> to from
+  <span class="kw">where</span>
+    to input <span class="fu">=</span> <span class="dt">List</span> <span class="fu">$</span> productToItems <span class="fu">$</span> G.from input
+    from (<span class="dt">List</span> list) <span class="fu">=</span> G.to <span class="fu">&lt;$&gt;</span> productFromItems list
+    from _ <span class="fu">=</span> <span class="dt">Nothing</span>
+
+<span class="co">-- ...and use that Converter as the default implementation</span>
+<span class="kw">class</span> <span class="dt">Convertible</span> a <span class="kw">where</span>
+<span class="ot">  converter ::</span> <span class="dt">Converter</span> a
+  default<span class="ot"> converter ::</span> (<span class="dt">Generic</span> a, <span class="dt">ConvertProduct</span> (<span class="dt">Rep</span> a)) 
+                    <span class="ot">=&gt;</span> <span class="dt">Converter</span> a
+  converter <span class="fu">=</span> asProduct</code></pre></div>
+<p>The cost of this is a little extra work when implementing <code>Convertible</code> from scratch. When implementing the old <code>Convertible</code> class, we just had two write to functions; in the new version, we need to write a <em>third</em> function that returns a <code>Converter</code> with our two functions in it. Thankfully, we can define our old <code>toItem</code> and <code>fromItem</code> methods in terms of these new abstractions, so none of the usages need to change.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">toItem ::</span> <span class="dt">Convertible</span> a <span class="ot">=&gt;</span> a <span class="ot">-&gt;</span> <span class="dt">Item</span>
+toItem <span class="fu">=</span> convertToRLP converter
+
+<span class="ot">fromItem ::</span> <span class="dt">Convertible</span> a <span class="ot">=&gt;</span> <span class="dt">Item</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a
+fromItem <span class="fu">=</span> convertFromRLP converter</code></pre></div>
+<p>With that machinery in place, we can write a simple function that takes a converter and returns a new one that handles tagged representations. When the original converter encodes a value as an RLP <code>List</code>, it prepends the tag to the list and passes it on. When decoding, it checks that the tag matches – if it matches, it strips the tag and delegates the rest of the decoding to the underlying converter.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">tagged ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Converter</span> a <span class="ot">-&gt;</span> <span class="dt">Converter</span> a
+tagged n conv <span class="fu">=</span> <span class="dt">Converter</span> to from
+  <span class="kw">where</span>
+    tag <span class="fu">=</span> toItem n
+    to input <span class="fu">=</span> <span class="kw">case</span> convertToRLP conv input <span class="kw">of</span>
+      <span class="dt">List</span> list <span class="ot">-&gt;</span> <span class="dt">List</span> (tag<span class="fu">:</span>list)
+      other <span class="ot">-&gt;</span> other
+    from (<span class="dt">List</span> (x<span class="fu">:</span>xs)) <span class="fu">|</span> x <span class="fu">==</span> tag <span class="fu">=</span> 
+      convertFromRLP conv <span class="fu">$</span> <span class="dt">List</span> xs
+    from (<span class="dt">List</span> _) <span class="fu">=</span> <span class="dt">Nothing</span>
+    from item <span class="fu">=</span> convertFromRLP conv item</code></pre></div>
+<p>And with <em>that</em>, we can now write a lightweight instance for <code>Hello</code>:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Hello</span> <span class="kw">where</span> 
+  converter <span class="fu">=</span> tagged <span class="bn">0x00</span> asProduct</code></pre></div>
+<p>There’s only one bit of functionality missing – we’d like some help defining conversions for types like our <code>Message</code> type, where every constructor has a single field, and we just want to use the representation for that field without wrapping. It looks quite a bit like our first generic function, and this post is already creaking under the weight of all the code, so I’ll leave it out. (If you’re interested, you can find it in <a href="https://github.com/bkirwi/ethereum-haskell/blob/master/src/Ethereum/RLP/Convert.hs">Convert.hs</a> on GitHub.) In the end, though, we get a type signature suspiciously similar to <code>asProduct</code>’s:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">asUnderlying ::</span> (<span class="dt">Generic</span> a, <span class="dt">ConvertUnderlying</span> (<span class="dt">Rep</span> a)) 
+             <span class="ot">=&gt;</span> <span class="dt">Converter</span> a</code></pre></div>
+<p>…and the rest of our instance declarations fall into place:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">GetPeers</span> <span class="kw">where</span> 
+  converter <span class="fu">=</span> tagged <span class="bn">0x10</span> asProduct
+
+<span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Peers</span> <span class="kw">where</span> 
+  converter <span class="fu">=</span> tagged <span class="bn">0x11</span> asUnderlying
+
+<span class="kw">instance</span> <span class="dt">Convertible</span> <span class="dt">Message</span> <span class="kw">where</span> 
+  converter <span class="fu">=</span> asUnderlying</code></pre></div>
+<p>I think that’s about as declarative as this is going to get.</p>
+<p>My first attempt at supporting this functionality involved complicating the original <code>ConvertProduct</code> type class – I added an extra function for the tag, which needed a phantom type, and I special-cased the single-field constructor, and I <em>still</em> had to write a bunch of stuff by hand. Splitting out the old type class members into a regular data type made the code much easier to follow, and made these new features much easier to implement. <a href="http://lukepalmer.wordpress.com/2010/01/24/haskell-antipattern-existential-typeclass/">Reasonable</a> <a href="http://www.haskellforall.com/2012/05/scrap-your-type-classes.html">people</a> have pointed out that some things just work better at the value level than at the type class level, and that seems to be the case here. It’s a pain we have to do this manually, since GHC is supposedly doing something quite similar behind the scenes, but I don’t see any obvious alternatives that don’t cause problems elsewhere.</p>
+<h3 id="general-thoughts">General Thoughts</h3>
+<p>This turned out to be a lot more library than I was expecting to need – mostly because I grossly underestimated the number and repetitiveness of the data types that the spec defined. GHC extensions can also be a bit of a rabbit hole, so I’d meant to avoid learning more until I’d written a bit more code. In fact, pretty much everything after that first type class was stuff that I had been hoping to get away without.</p>
+<p>Still, I had to write all those instances somehow – and while it’s hard to quantify, I feel this library has more than paid for itself. Judging by the few handwritten <code>Convertible</code> instances, doing <em>everything</em> manually would have taken significantly more code – the library is bigger, but the instances are dramatically smaller. Shifting that code out of the main codebase leaves more space and focus for the code that does interesting work, or the few data types where the representation in RLP is unusual or complex. Making patterns into actual language-level values, like we did with our ‘product’ representation, is also inherently useful: you just need to get things correct once, and the rest if the codebase can share the benefits.</p>
+<p>Unfortunately, my first generic implementation was <em>not</em> correct: given a very particular shape of data type and the right RLP data, decoding failed when it should have succeeded. None of my existing types had that shape, nor did any types in my unit tests – I only caught this one with a close reading. I feel a bit of a hypocrite after singing the praises of QuickCheck last time around, since covering odd cases like this is exactly what property tests is for, and I haven’t managed to write any property tests yet. This is not for lack of trying, though; I haven’t been able to work around the fact that the generic function needs to be tested against values of many different types, but an individual QuickCheck generator always returns values of the <em>same</em> type. It seems like there ought to be a solution for this, but I haven’t come across it yet.</p>
+<h3 id="other-implementations">Other Implementations</h3>
+<p>In the last post, we looked quickly at the standard Go and Python implementation of the RLP encoding, comparing them to each other and to the Haskell version. I was hoping to do the same again, but it’s a bit trickier this time: the implementations differ much more than last time, and the interesting bits are spread across many files. To simplify things, I’ll focus on the <a href="https://github.com/ethereum/eth-go/tree/0.6.0/">implementation in Go</a>. As always, code comparisons should be taken with several grains of salt; I encourage you to follow the links to the original code and draw your own conclusions.</p>
+<p>The rough equivalent of our RLP <code>Item</code> is the <code>Value</code> type in <a href="https://github.com/ethereum/eth-go/blob/0.6.0/ethutil/value.go"><code>value.go</code></a>. While our definition of <code>Item</code> closely mirrors the spec, the <code>Value</code> class can contain a variety of numeric types as well. (I assume this is an optimization, but I haven’t found how or what it helps.) Most of the code consists of dynamic type checks and casts, as well as some methods for indexing into and taking ranges of lists. (If you make a nonsensical cast, or ask for a missing field, the <code>Value</code> type returns a default value instead of an error; this means that even nonsensical input will often be ‘successfully’ parsed.)</p>
+<p>The Go implementation has no direct equivalent to the <code>Convertible</code> type class. Conversions to the handful of primitive types (numeric types, byte strings) live as methods on the <code>Value</code> type, and the RLP serialization method handles them directly. The equivalent of the <code>Message</code> type is in <a href="https://github.com/ethereum/eth-go/blob/0.6.0/ethwire/messaging.go"><code>messaging.go</code></a>, but that only handles the type tag and leaves the rest of the fields in their encoded form – the conversions for the message data are mostly in another file, <a href="https://github.com/ethereum/eth-go/blob/0.6.0/peer.go"><code>peer.go</code></a>, interleaved with some networking logic. Except for numeric conversions, which are handled within the <code>Value</code> type, there’s no consistent way to move back and forth between a type and it’s RLP representation. There’s also no Go equivalent to our use of <code>GHC.Generics</code> to capture composite structures. Sometimes, conversions between a Go class and the equivalent RLP are written manually; often there’s no explicit Go class at all, and the <code>Value</code> type is used raw.</p>
+<p>In general, the <code>eth-go</code> code works at a low level of abstraction, converting between representations by hand and leaving the expected structure implicit. I’d expect a higher-level interface to look something like <a href="http://golang.org/pkg/encoding/json">Go’s standard JSON library</a> – which uses a mix of interfaces, reflection, and mutation to automatically translate back and forth between data types and JSON – but I haven’t worked out enough details to know how feasible / easy that would be, or to compare the convenience of that approach with the Haskell version above.</p>
+<p>It’s difficult to make a fair comparison between the two codebases, since the two approaches diverge so much, but some general properties are fairly clear. Counting just the core type-agnostic abstractions (including the generic programming bits) the Haskell code is maybe half the size of the Go implementation; the gap widens when you include the conversions for specific types, since GHC is doing a bunch of work that the Go programmer has to do by hand. However, the Go code is less abstract, and it involves less conceptual machinery.</p>
+<p>It’s interesting to see how these basic infrastructural things have a big impact on the rest of their respective codebases. Hopefully, we’ll get a chance to go through some of the bigger ones in future posts.</p>
+<h3 id="conclusions">Conclusions</h3>
+<p>Now that this infrastructure’s out of the way, we can start digging into the algorithmic heart of Ethereum. Next time, I expect we’ll look at the Merkle trees used for cryptographically authenticated state – with brief digressions into free monads, initial vs. final encodings, and other fun and interesting things.</p>
+</article>
+<footer>
+  <p>
+  No comments here! 
+
+  Feel free to get in touch on <a href="https://github.com/bkirwi">
+    GitHub</a> or <a href="https://twitter.com/bkirwi">Twitter</a>.
+  </p>
+<footer>
+
+    </div>
+  </body>
+</html>
