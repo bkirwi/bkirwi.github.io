@@ -1,0 +1,40 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> Barely Functional #3 | ben.kirw.in </title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css"></link>
+    <link rel="stylesheet" type="text/css" href="/css/kate-highlighting.css"></link>
+    <!--
+    <link href='http://fonts.googleapis.com/css?family=Open+Sans' rel='stylesheet' type='text/css'>
+    <link href='http://fonts.googleapis.com/css?family=PT+Sans+Narrow:700' rel='stylesheet' type='text/css'>
+    -->
+  </head>
+  <body>
+    <div class="content">
+      <header>
+        <img src="/img/construction.gif"></img>
+        <nav><ul>
+          <li><a href="/">home</a></li>
+          <li><a href="/about/">about</a></li>
+        </ul></nav>
+      </header>
+      <article>
+  <h1> Barely Functional #3 </h1>
+  <h2> Tries and Failures </h2>
+  <p>Well, time flies! It’s well over a year ago that I promised to continue my writeups on the <code>ethereum-haskell</code> project with some notes on the merkle trie implementation – but it’s been a long time since I’ve had time or inclination to chip at that project, and my notes have been collecting dust.</p>
+<p>Since I’d rather not keep that promise alive for another year, here’s the next best thing: <a href="http://ben.kirw.in/merkle-slides/">slides from a presentation I gave to Haskell Montreal last year</a>.</p>
+<p>The slides are fairly vanilla haskell, running through a few themes and variations on mapping types in Haskell: association lists, tries, <em>Patricia</em> tries, and then on to Merkle tries and other fancy things. One thing I explore a little bit in the slides, but have never totally fleshed out in real life, is the idea of “abstracting over a reference.” At the end of the day, a Merkle tree is just a regular tree with an unusual reference creation / following procedure – and by abstracting those out, you can write algorithms don’t have to care what type of tree they’re working with at all.</p>
+<p>I always feel a little bad throwing slides around on the internet, since they suffer a lot without context – if you have any questions, or you’re just interested in talking about how to write extensions to Pandoc in Haskell, feel free to get in touch!</p>
+</article>
+<footer>
+  <p>
+  No comments here! 
+
+  Feel free to get in touch on <a href="https://github.com/bkirwi">
+    GitHub</a> or <a href="https://twitter.com/bkirwi">Twitter</a>.
+  </p>
+<footer>
+
+    </div>
+  </body>
+</html>
