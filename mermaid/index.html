@@ -1,0 +1,68 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> mermaid | ben.kirw.in </title>
+  </head>
+  <body style="margin: 0px;">
+
+<svg id="canvas" style="width: 100%; height: 100%">
+  <circle cx="250" cy="50" r="30" fill="blue" stroke="black" stroke-width=4px />
+</svg>
+
+<script>
+
+var svg = document.getElementById("canvas"),
+    spacing = 20,
+    svgns = "http://www.w3.org/2000/svg",
+    width = window.innerWidth,
+    height = window.innerHeight,
+    across = Math.ceil(width / spacing) + 1,
+    down = Math.ceil(height / spacing),
+    scales = [];
+
+function pickColor(x, y, mX, mY) { 
+  var junk = 8 * (x + y) / (across + down) + (mX / 100 + 1) + (mY / 200 + 1),
+      ratio = (Math.sin(junk) + 1) / 2,
+      h = 190 + 80 * ratio,
+      s = 40 + 20 * ratio,
+      v = 50;
+  return "hsl(" + h + "," + s + "%," + v + "%)";
+}
+
+for (var y = down; y >= 0; y -= 1) {
+  for (var x = 0; x < across; x += 2) {
+    var offset = y % 2,
+        circle = document.createElementNS(svgns, "circle"),
+        crazyX = x + Math.random() * (across + down),
+        color = pickColor(crazyX, y, 1, 1);
+
+    circle.setAttribute('cx', (x + offset) * spacing);
+    circle.setAttribute('cy', y * spacing);
+    circle.setAttribute('r', spacing);
+    circle.setAttribute('fill', color);
+    circle.setAttribute('stroke', 'black');
+    circle.setAttribute('stroke-width', '4px');
+
+    svg.appendChild(circle);
+
+    scales.push({
+      x: crazyX,
+      y: y,
+      circle: circle
+    });
+  }
+}
+
+document.body.onmousemove = function(event) {
+
+  window.requestAnimationFrame(function(now) {
+    scales.forEach(function(scale) {
+      scale.circle.setAttribute('fill', pickColor(scale.x, scale.y, event.x || event.clientX, event.y | event.clientY));
+    });
+  });
+}
+
+</script>
+
+  </body>
+</html>
