@@ -1,0 +1,76 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> Hash-Range Partitioning | ben.kirw.in </title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css"></link>
+    <link rel="stylesheet" type="text/css" href="/css/kate-highlighting.css"></link>
+    <!--
+    <link href='http://fonts.googleapis.com/css?family=Open+Sans' rel='stylesheet' type='text/css'>
+    <link href='http://fonts.googleapis.com/css?family=PT+Sans+Narrow:700' rel='stylesheet' type='text/css'>
+    -->
+  </head>
+  <body>
+    <div class="content">
+      <header>
+        <img src="/img/construction.gif"></img>
+        <nav><ul>
+          <li><a href="/">home</a></li>
+          <li><a href="/about/">about</a></li>
+        </ul></nav>
+      </header>
+      <article>
+  <h1> Hash-Range Partitioning </h1>
+  <h2> Better partitioning for distributed data </h2>
+  <p>In distributed systems, it’s extroardinarily common to want to split a large dataset across some number of physical shards or partitions. This is commonly done by taking the key, hashing it, and then taking the hash modulo the number of partitions:</p>
+<pre><code>def partition(key, num_partitions):
+  hash(key) % num_partitions</code></pre>
+<p>Let’s call that <em>hash-modulus</em> partitioning for short. It’s simple, straightforward, and correct, and it’s used as the default partitioner in projects from Spark to Kafka to Hive. It’s also far from optimal, especially when you’re joining different data sets together.</p>
+<p>Here’s a slightly different partitioning function, which I’ll call <em>hash-range</em> partitioning:</p>
+<pre><code>def partition(key, num_partitions):
+  (hash(key) * num_partitions) &gt;&gt; hash_bits</code></pre>
+<p>This post explains how that function works and why you might prefer it.</p>
+<h2 id="why-it-works">Why it works</h2>
+<p>So we can visualize things easily, let’s imagine we’re using a tiny 4-bit hash function. This gives us 2^4=16 different possible hash values, mapping to the integers from 0 to 15.</p>
+<pre><code> 0                             15
+└─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┘</code></pre>
+<p>Hash-modulus partitioning will take those 16 values and round-robin them across our partitions. If we have 3 partitions for our 16 possible hashes, we get:</p>
+<pre><code> 0 1 2 0 1 2 0 1 2 0 1 2 0 1 2 0 
+└─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┴─┘</code></pre>
+<p>Hash-range partitioning, on the other hand, will split the hash space into ranges and assign a partition to each range. For our 3 partitions, that looks something like:</p>
+<pre><code> 0 0 0 0 0 0 1 1 1 1 1 2 2 2 2 2
+└───────────┴─────────┴─────────┘</code></pre>
+<p>Like the hash-modulo partitioning, this divides the values “as fairly as possible” between partitions.</p>
+<h2 id="why-its-better">Why it’s better</h2>
+<p>Almost every system that needs to partition data also needs to <em>repartition</em> data: taking an existing dataset with <span class="math inline"><em>n</em></span> partitions and turning it into a new dataset with <span class="math inline"><em>m</em></span> partitions. For example, Spark can only join two datasets with the same number of partitions… if you try and join two datasets with different partition counts, Spark will need to repartition at least one of them to make the counts match up before doing the join.</p>
+<p>Let’s imagine we want to turn our 3-partition dataset into a four-partition dataset, and compare the partition numbers hash-modulus partitioning assigns.</p>
+<pre><code> 0 1 2 0 1 2 0 1 2 0 1 2 0 1 2 0 
+├─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┤
+ 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3</code></pre>
+<p>There’s absolutely no correlation here! Data from partition 0 in our 3-partition dataset is spread out over all 4 partitions in our new dataset.</p>
+<p>Here’s how hash-range partitioning does it:</p>
+<pre><code> 0 0 0 0 0 0 1 1 1 1 1 2 2 2 2 2
+├───────┬───┴───┬─────┴─┬───────┤
+ 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3</code></pre>
+<p>Here the correlation is quite strong: each of our output partition maps to just one or two of our input partitions.</p>
+<p>With hash-modulo partitioning, repartitioning is a “global” operation: each output partition depends on every input partition. With hash-range partitioning, repartitioning is “local” and has a much narrow set of dependencies. This can have really meaningful consequences for reliability and performance. For example, suppose we lose a machine that holds one of our output partitions. If we’re using hash-modulus partitioning, we’ll have to refetch the data from <em>all</em> our input partitions; with hash-range partitioning, we’ll only have to contact one or two.</p>
+<h2 id="what-to-do-about-it">What to do about it</h2>
+<p>Many data-processing tools, like Spark and Kafka, leave the partitioning algorithm configurable. Consider using hash-range partitioning for your data, even if you’re not going to take advantage of the easier repartitioning yet… changing the partitioning of some datasets (eg. Kafka topics) can be a pain, so it’s easier to get it right up front. If you’re the <em>author</em> of some framework, consider making hash-range partitioning the default. (And please don’t hardcode hash-modulus partitioning!)</p>
+<p>If you’re working on the JVM, note that typical <code>hashCode</code> implementations distribute data very badly, in a way that hash-modulus partitioning can help hide. If you’re adopting hash-range partitioning, you’ll want to make sure you’re using a halfway-decent hash algorithm as well. (Murmur3 is a good choice!)</p>
+<p>To make your life easy, here’s a quick implementation in Java 8, which I hereby place in the public domain:</p>
+<div class="sourceCode"><pre class="sourceCode java"><code class="sourceCode java"><span class="kw">public</span> <span class="dt">static</span> <span class="dt">int</span> <span class="fu">partition</span>(<span class="dt">int</span> hashCode, <span class="dt">int</span> numPartitions) {
+  <span class="kw">return</span> (<span class="dt">int</span>) (Integer.<span class="fu">toUnsignedLong</span>(hashCode) * numPartitions &gt;&gt; <span class="dv">32</span>);
+}</code></pre></div>
+<p>If you end up finding this helpful, please let me know!</p>
+</article>
+<footer>
+  <p>
+  No comments here! 
+
+  Feel free to get in touch on <a href="https://github.com/bkirwi">
+    GitHub</a> or <a href="https://twitter.com/bkirwi">Twitter</a>.
+  </p>
+<footer>
+
+    </div>
+  </body>
+</html>
