@@ -8,7 +8,7 @@ header:after {
 }
   
 h1 {
-  font-size: 3em;
+  font-size: 2.5em;
   line-height: 1.2em;
   margin-bottom: -0.2em;
 }
@@ -37,9 +37,8 @@ div.content {
 
 body {
   color: #002b36;
-  font-family: 'Droid Serif', serif;
-  font-size: 16px;
-  font-size-adjust: 0.5;
+  font-family: 'Source Serif Pro', serif;
+  font-size: 18px;
 }
 
 article {
@@ -52,17 +51,22 @@ sup {
 }
 
 code {
-  font-family: 'Source Code Pro', 'Droid Mono', monospace;
+  font-family: 'Source Code Pro', monospace;
+  background-color: #ededed;
+  border-radius: 5px;
+  padding: 0 0.1em;
 }
 
 pre {
   overflow-x: auto;
   padding: 0.01em 1em;
+  background-color: #ededed;
+  border-radius: 5px;
 }
 
 svg {
   margin: 1em;
-  font-family: 'Source Code Pro', 'Droid Mono', monospace !important;
+  font-family: 'Source Code Pro', monospace !important;
 }
 
 a:link {
@@ -101,9 +105,7 @@ nav li {
   margin: 0px 0.2em;
   list-style-type: none;
   display: inline;
-  font-size: 1em;
   font-weight: bold;
-  font-family: 'Droid Sans', sans-serif;
 }
 
 nav li a {

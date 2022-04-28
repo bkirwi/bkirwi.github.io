@@ -1,0 +1,59 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title> Five years of decline | ben.kirw.in </title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css"></link>
+    <link rel="stylesheet" type="text/css" href="/css/kate-highlighting.css"></link>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Serif+Pro:wght@400;700&amp;family=Source+Code+Pro:wght@400;700&amp;display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div class="content">
+      <header>
+        <img src="/img/construction.gif"></img>
+        <nav><ul>
+          <li><a href="/">home</a></li>
+          <li><a href="/about/">about</a></li>
+        </ul></nav>
+      </header>
+      <article>
+  <h1> Five years of decline </h1>
+  <h2> (the command-line parsing library) </h2>
+  <p>It’s been a little over five years since I first published <code>decline</code>, a functional and UNIXy command-line parser for Scala. (If you’re not familiar with <code>decline</code>, <a href="http://monovore.com/decline/">the documentation might help</a>.)</p>
+<p>For me, five years is enough time to start forgetting things… so before that happens, this page collects some of the early history of <code>decline</code> and the motivations and ideas behind it. It may be interesting to others thinking about API design, or anyone who’s just curious about the library.</p>
+<h2 id="why-decline">Why decline?</h2>
+<p>Imagine it: you’re me, in the mid-2010s, writing Scala. The teams I worked on tended to write in the popular “mostly functional” style, which stresses things like composition and immutability. For new team members, who often came in with a Java/OOP-ish background, this style was often fairly new. (As it was for me just a couple years earlier!)</p>
+<p>One common way to learn a language is to write a little command-line application; and if you do, one of the first libraries you may reach for is a command-line parser. There were a couple popular Scala libraries for this already, but they were designed around mutation and made composition rather awkward. I don’t mean to slight these libraries; they do the job effectively, and they’re still very popular! But it sure doesn’t look that great for functional programming if it can’t handle the first simple problem you encounter.</p>
+<p>If you want to figure out how to solve a problem with functional programming, Haskell is one obvious place to look. Haskellers in particular tend to reach for <a href="https://hackage.haskell.org/package/optparse-applicative-0.17.0.0#readme"><code>optparse-applicative</code></a>; it has a clean, compositional API and generates very good help output out of the box. Unfortunately, porting Haskell code directly tends to make for very and obscure awkward Scala… a particularly bad idea if you’re hoping to make something approachable. So, <code>decline</code>’s job: pull the key ideas from <code>optparse-applicative</code> over to Scala, but in a way that feels as idiomatic as possible and plays nicely with the rest of the language.</p>
+<h2 id="small-and-boring">Small and boring</h2>
+<p>If you’re working on a fun and exciting library like Spark or Cats — the sort of thing that someone might write a book about, or add as a skill to their CV — you can afford a bit of a learning curve if it pays off in the long run.</p>
+<p><code>decline</code> is not that kind of library. Relatively few people are especially fired up about command-line parsing. (This is true for most domains, I think… a bit of a trap for a library author, because almost any domain can be interesting once you get really deep into it, so it’s easy to complicate things in ways that won’t benefit most users.) So: one priority for <code>decline</code> was to keep the API as simple as possible. This has had a major impact on every part of the design:</p>
+<ul>
+<li>Any set of command line options – ranging from single flags or positional arguments to dozens of nested subcommands – has the same top-level type, <code>Opts</code>. This means any way <code>decline</code> allows you to combine different <code>Opts</code> instances ought to work for all possible combinations of options. (Want to give a subcommand a default value, or make a flag and pair of positional arguments mutually exclusive? Probably not! But <code>decline</code> handles these cases anyways.) This makes for a very flexible and general core; it also makes certain types of features harder to implement.</li>
+<li><code>decline</code> generally only implements a CLI-facing feature if it’s found in the POSIX or GNU standards (like short and long flags) or is very common in the wild (like subcommands). Aside from generally keeping things well-scoped, this was also meant to nudge developers towards building CLIs with a more standard shape that was easier to document… and thus hopefully for the end user to learn.</li>
+<li>It has relatively few helper methods: anything that’s not extremely commonly-needed has been left out. As a result, many users building complex CLIs end up implementing some helpers of their own to make certain patterns easier. However, everyone seems to want a slightly different set… if all the helpers anyone had suggested were added to <code>decline</code>, the public API would be several times larger.</li>
+</ul>
+<p>This tradeoff is probably not the right one for all libraries, or all authors, and I suspect some users have found this annoying… but on balance, I think it’s been pretty fruitful for <code>decline</code>.</p>
+<p>One way <code>decline</code> manages to add value <em>without</em> making the interface more complicated is by improving the quality of the error messages or the help. (Probably half the code in <code>decline</code> is dedicated to this, and there’s still some room to do better.) These aren’t especially glamorous features, but I think they do a lot to improve the experience for the end users of the CLI, as well as the developers who care about them.</p>
+<h2 id="on-alternative">On Alternative</h2>
+<p><a href="https://typelevel.org/cats/typeclasses.html">Type classes</a> are a common tool for writing generic code in Scala, but they also work a bit like design patterns are intended to. If you know some type implements a particular type class, that often gives you a pretty good hint about how to work with it; and when you’re designing a type it’s often helpful to think a bit about the type classes it might implement to guide your work.</p>
+<p><code>decline</code> is designed around <a href="https://typelevel.org/cats/typeclasses/alternative.html">the <code>Alternative</code> type class</a>. This is the key idea it takes from <code>optparse-applicative</code>. It’s not especially common in Scala, though; <code>decline</code> is often the first place people encounter <code>Alternative</code> in the wild. Since it’s unfamiliar, this adds some learning curve, but it’s also critical for features like the autogenerated help output or powerful validation.</p>
+<p>I’d love for <code>Alternative</code> to be better known: it is an extraordinarily useful type class. However, <code>decline</code>’s docs barely mention it! It’s possible to be effective with <code>decline</code> without understanding <code>Alternative</code>, so forefronting it might be unnecessarily daunting or confusing. Personally, I find a type class easier to get an intuition for when I’ve already seen the pattern a few times; I hope that having some experience with <code>decline</code> makes it easier for people to figure out <code>Alternative</code> later on, if they decide to take that plunge.</p>
+<h2 id="releasing-and-what-comes-after">Releasing, and what comes after</h2>
+<p><code>decline</code> existed for nearly a year before I really told anyone about it. I have never been that interested in the glamorous life of an open-source maintainer — for me, the responsible-maintenancey aspects of the job are not the fun parts, important as they are — but also wasn’t keen to just throw the codebase over the wall and walk away. I did eventually submit <code>decline</code> to the Typelevel incubator, and it’s mostly spread by word of mouth since then.</p>
+<p>I have not regretted this so far! In part, the narrow scope of the library has helped keep things manageable… and while it does require saying “no” a lot, most users have been pretty good sports about it. <code>decline</code> has also attracted a <a href="https://github.com/bkirwi/decline/graphs/contributors">wonderful set of contributors</a> who’ve added features or helped the library keep up with change in the world around it; my sincere thanks to everyone who’s chosen to spend their time on this!</p>
+<p><code>decline</code> also owes a huge debt to Typelevel. Aside from <a href="https://typelevel.org/cats/">the <code>cats</code> library</a>, which is great and <code>decline</code> uses to full advantage — community moderation is a hard and often thankless job, and Typelevel has built what is perhaps the healthiest community in the Scala ecosystem. <code>decline</code> would likely not exist without it.</p>
+</article>
+<footer>
+  <p>
+  No comments here! 
+
+  Feel free to get in touch on <a href="https://github.com/bkirwi">
+    GitHub</a> or <a href="https://twitter.com/bkirwi">Twitter</a>.
+  </p>
+<footer>
+
+    </div>
+  </body>
+</html>
